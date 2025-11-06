@@ -1,0 +1,20 @@
+{
+    "manifest_version": 3,
+    "name": "Sigma HMIS & Inventory Helper",
+    "version": "1.0.0",
+    "description": "Patient info & inventory monitoring for Bahmni",
+    "content_scripts": [
+      {
+        "matches": ["<all_urls>"],
+        "js": ["content.js"],
+        "run_at": "document_idle"
+      }
+    ],
+    "web_accessible_resources": [
+      {
+        "resources": ["injected.js"],
+        "matches": ["<all_urls>"]
+      }
+    ],
+    "permissions": ["storage"]
+  }
