@@ -64,6 +64,7 @@ async function showOverlay(uuid, displayId) {
         <button class="hmis-tab" data-tab="clinic" style="flex:1; padding:10px; border:none; background:transparent; cursor:pointer; font-size:13px; font-weight:500; border-bottom: 2px solid transparent; outline:none;">Clinic</button>
         <button class="hmis-tab" data-tab="insurance" style="flex:1; padding:10px; border:none; background:transparent; cursor:pointer; font-size:13px; font-weight:500; border-bottom: 2px solid transparent; display:none; outline:none;">Insurance</button>
         <button class="hmis-tab" data-tab="dental" style="flex:1; padding:10px; border:none; background:transparent; cursor:pointer; font-size:13px; font-weight:500; border-bottom: 2px solid transparent; display:none; outline:none;">Dental</button>
+        <button class="hmis-tab" data-tab="notes" style="flex:1; padding:10px; border:none; background:transparent; cursor:pointer; font-size:13px; font-weight:500; border-bottom: 2px solid transparent; display:none; outline:none;">Notes</button>
       </div>
 
       <div id="hmis-content" style="padding: 16px; max-height: 400px; overflow-y: auto; font-size: 13px;">
@@ -184,6 +185,11 @@ async function showOverlay(uuid, displayId) {
     if (data.dental_treatments && data.dental_treatments.length > 0) {
       dentalTab.style.display = 'block';
     }
+    
+    const notesTab = overlay.querySelector('[data-tab="notes"]');
+    if (data.notes && data.notes.length > 0) {
+      notesTab.style.display = 'block';
+    }
 
     setupTabs(data);
     showTab('visit', data);
@@ -235,6 +241,9 @@ function showTab(tabName, data) {
     case 'dental':
       content.innerHTML = renderDentalTab(data.dental_treatments);
       break;
+    case 'notes':
+      content.innerHTML = renderNotesTab(data.notes);
+      break;
   }
 }
 
@@ -257,6 +266,17 @@ function formatPhoneNumber(phone) {
   }
   
   return phone;
+}
+
+function formatCurrency(value) {
+  if (!value) return '—';
+  
+  // Try to parse as number
+  const numValue = parseFloat(value);
+  if (isNaN(numValue)) return value;
+  
+  // Format with thousand separators and MWK currency
+  return `MWK ${numValue.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
 function createTable(rows) {
@@ -383,6 +403,38 @@ function renderDentalTab(treatments) {
     <div style="margin-bottom: 12px;">
       <h3 style="margin: 0 0 12px 0; font-size: 14px; color: #00897B;">Dental Treatments</h3>
       ${treatmentsList}
+    </div>
+  `;
+}
+
+function renderNotesTab(notes) {
+  if (!notes || notes.length === 0) {
+    return '<p style="color: #666; text-align: center; padding: 20px;">No notes recorded</p>';
+  }
+
+  const notesList = notes.map(note => {
+    const createdDate = new Date(note.created_at);
+    const updatedDate = new Date(note.updated_at);
+    const isUpdated = note.updated_at !== note.created_at;
+    
+    return `
+      <div style="border: 1px solid #e0e0e0; border-radius: 6px; padding: 12px; margin-bottom: 12px; background: #fafafa;">
+        ${createTable([
+          ['Label', note.label || 'N/A'],
+          ['Value', formatCurrency(note.value)],
+          ['Created By', note.created_by_name || 'N/A'],
+          ['Created At', createdDate.toLocaleString()],
+          isUpdated ? ['Updated By', note.updated_by_name || 'N/A'] : null,
+          isUpdated ? ['Updated At', updatedDate.toLocaleString()] : null
+        ].filter(row => row !== null))}
+      </div>
+    `;
+  }).join('');
+
+  return `
+    <div style="margin-bottom: 12px;">
+      <h3 style="margin: 0 0 12px 0; font-size: 14px; color: #00897B;">Visit Notes</h3>
+      ${notesList}
     </div>
   `;
 }
