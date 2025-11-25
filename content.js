@@ -3,6 +3,7 @@ console.log("Bahmni HMIS & Inventory Helper - Starting");
 let currentUuid = null;
 let overlay = null;
 let isCollapsed = false;
+let currentVisitData = null;
 
 // ==========================================
 // PART 1: PATIENT DATA EXTRACTION & OVERLAY
@@ -55,7 +56,10 @@ async function showOverlay(uuid, displayId) {
     <div id="hmis-overlay-expanded">
       <div style="display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid #e0e0e0; background: #00897B; color: white; border-radius: 10px 10px 0 0;">
         <strong style="font-size: 15px;">Sigma HMIS Visit Summary</strong>
-        <button id="hmis-minimize-btn" style="background:none; border:none; font-size:20px; cursor:pointer; color:white; padding:0;">−</button>
+        <div style="display: flex; align-items: center; gap: 12px;">
+          <button id="hmis-settings-btn" title="Settings" style="background:none; border:none; font-size:16px; cursor:pointer; color:white; padding:4px 6px; display:flex; align-items:center; justify-content:center; border-radius:4px; transition:background 0.2s;">⚙</button>
+          <button id="hmis-minimize-btn" title="Minimize" style="background:none; border:none; font-size:20px; cursor:pointer; color:white; padding:0;">−</button>
+        </div>
       </div>
       
       <div id="hmis-tabs" style="display: flex; border-bottom: 1px solid #e0e0e0; background: #f5f5f5;">
@@ -65,6 +69,7 @@ async function showOverlay(uuid, displayId) {
         <button class="hmis-tab" data-tab="insurance" style="flex:1; padding:10px; border:none; background:transparent; cursor:pointer; font-size:13px; font-weight:500; border-bottom: 2px solid transparent; display:none; outline:none;">Insurance</button>
         <button class="hmis-tab" data-tab="dental" style="flex:1; padding:10px; border:none; background:transparent; cursor:pointer; font-size:13px; font-weight:500; border-bottom: 2px solid transparent; display:none; outline:none;">Dental</button>
         <button class="hmis-tab" data-tab="notes" style="flex:1; padding:10px; border:none; background:transparent; cursor:pointer; font-size:13px; font-weight:500; border-bottom: 2px solid transparent; display:none; outline:none;">Notes</button>
+        <button class="hmis-tab" data-tab="settings" style="flex:1; padding:10px; border:none; background:transparent; cursor:pointer; font-size:13px; font-weight:500; border-bottom: 2px solid transparent; outline:none;">⚙ Settings</button>
       </div>
 
       <div id="hmis-content" style="padding: 16px; max-height: 400px; overflow-y: auto; font-size: 13px;">
@@ -80,8 +85,29 @@ async function showOverlay(uuid, displayId) {
   document.body.appendChild(overlay);
 
   const minimizeBtn = overlay.querySelector('#hmis-minimize-btn');
+  const settingsBtn = overlay.querySelector('#hmis-settings-btn');
   const expanded = overlay.querySelector('#hmis-overlay-expanded');
   const collapsed = overlay.querySelector('#hmis-overlay-collapsed');
+
+  // SETUP TABS FIRST - BEFORE ANY ERROR CAN OCCUR
+  setupTabs();
+
+  // Settings button click handler - switch to settings tab
+  settingsBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const settingsTab = overlay.querySelector('[data-tab="settings"]');
+    if (settingsTab) {
+      settingsTab.click();
+    }
+  });
+
+  // Settings button hover effects
+  settingsBtn.addEventListener('mouseenter', () => {
+    settingsBtn.style.background = 'rgba(255,255,255,0.2)';
+  });
+  settingsBtn.addEventListener('mouseleave', () => {
+    settingsBtn.style.background = 'none';
+  });
 
   minimizeBtn.addEventListener('click', () => {
     expanded.style.display = 'none';
@@ -112,18 +138,28 @@ async function showOverlay(uuid, displayId) {
   });
 
   try {
-    const res = await fetch(`http://localhost:8000/api/visits/summary/by-patient-uuid/${uuid}/`);
+    // Get API endpoint from storage (default to localhost if not set)
+    const storage = await new Promise((resolve) => {
+      chrome.storage.local.get(['apiEndpoint'], resolve);
+    });
+    const apiEndpoint = storage.apiEndpoint || 'http://localhost:8000';
+    
+    // Remove trailing slash if present
+    const baseUrl = apiEndpoint.replace(/\/$/, '');
+    const url = `${baseUrl}/api/visits/summary/by-patient-uuid/${uuid}/`;
+    
+    console.log("Fetching visit summary from:", url);
+    
+    const res = await fetch(url);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
 
     console.log("HMIS visit summary retrieved:", data);
-    console.log("Checking for clinic data - data keys:", Object.keys(data));
-    console.log("data.clinic_id:", data.clinic_id);
-    console.log("data.clinic_details:", data.clinic_details);
-    console.log("Full data object:", JSON.stringify(data, null, 2));
+
+    // STORE THE DATA GLOBALLY
+    currentVisitData = data;
 
     // STORE CLINIC DATA IN CHROME STORAGE
-    // Check multiple possible locations for clinic ID
     const clinicId = data.clinic_id || data.clinic_details?.id || data.clinic?.id;
     const clinicName = data.clinic_name || data.clinic_details?.name || data.clinic?.name;
     const clinicCode = data.clinic_code || data.clinic_details?.code || data.clinic?.code;
@@ -138,38 +174,24 @@ async function showOverlay(uuid, displayId) {
         patientUuid: uuid,
         lastUpdated: new Date().toISOString()
       }, () => {
-        console.log("Clinic data saved to storage:", {
-          clinicId: clinicId,
-          clinicName: clinicName,
-          patientUuid: uuid
-        });
-        console.log("CLINIC ID SAVED:", clinicId);
+        console.log("Clinic data saved to storage");
         
-        // INJECT INVENTORY MONITOR NOW (with clinic data available)
-        // Only inject on treatment page
         if (isTreatmentPage()) {
           console.log("Clinic data ready - injecting inventory monitor now");
           injectInventoryMonitor(() => {
-            // Callback after injection - send clinic data
-            console.log("Sending clinic data to injected script after injection:", {
-              clinicId: clinicId,
-              clinicName: clinicName
-            });
-            sendClinicDataToInjectedScript({
-              clinicId: clinicId,
-              clinicName: clinicName,
-              clinicCode: clinicCode,
-              patientUuid: uuid
-            });
+            (async () => {
+              await sendClinicDataToInjectedScript({
+                clinicId: clinicId,
+                clinicName: clinicName,
+                clinicCode: clinicCode,
+                patientUuid: uuid
+              });
+            })();
           });
-        } else {
-          console.log("Not on treatment page - clinic data saved for later use");
-          console.log("Clinic ID will be used when you navigate to treatment page");
         }
       });
     } else {
-      console.warn("No clinic ID found in visit summary data. Available keys:", Object.keys(data));
-      // Still inject the monitor on treatment page, it can request clinic data later
+      console.warn("No clinic ID found in visit summary data");
       if (isTreatmentPage()) {
         injectInventoryMonitor();
       }
@@ -191,25 +213,57 @@ async function showOverlay(uuid, displayId) {
       notesTab.style.display = 'block';
     }
 
-    setupTabs(data);
-    showTab('visit', data);
+    // Show the visit tab with data
+    showTab('visit');
 
   } catch (err) {
+    let errorMessage = err.message;
+    
+    if (err.message.includes('Failed to fetch') || err.message.includes('ERR_CERT_AUTHORITY_INVALID')) {
+      errorMessage = 'Certificate error or connection failed. If using HTTPS with a self-signed certificate, you may need to accept it in your browser first.';
+    } else if (err.message.includes('CORS')) {
+      errorMessage = 'CORS error: The API server may not allow requests from this origin.';
+    }
+    
     overlay.querySelector('#hmis-content').innerHTML = `
       <div style="color:#d32f2f; padding:12px; background:#ffebee; border-radius:4px;">
         <strong>Failed to load summary</strong><br/>
-        <small>${err.message}</small>
+        <small>${errorMessage}</small><br/>
+        <small style="margin-top:8px; display:block;">
+          <a href="#" id="configure-endpoint-link" style="color:#00897B; text-decoration:underline; cursor:pointer;">Configure API endpoint</a>
+        </small>
       </div>
     `;
+    
+    // Add click handler for the configure link
+    const configureLink = overlay.querySelector('#configure-endpoint-link');
+    if (configureLink) {
+      configureLink.addEventListener('click', (e) => {
+        e.preventDefault();
+        const settingsTab = overlay.querySelector('[data-tab="settings"]');
+        if (settingsTab) {
+          settingsTab.click();
+        }
+      });
+    }
+    
     console.error("Error fetching visit summary:", err);
   }
 }
 
-function setupTabs(data) {
+function setupTabs() {
   const tabs = overlay.querySelectorAll('.hmis-tab');
   tabs.forEach(tab => {
+    // Remove existing listeners to avoid duplicates
+    const newTab = tab.cloneNode(true);
+    tab.parentNode.replaceChild(newTab, tab);
+  });
+  
+  // Re-query after cloning
+  const tabsAfterClone = overlay.querySelectorAll('.hmis-tab');
+  tabsAfterClone.forEach(tab => {
     tab.addEventListener('click', () => {
-      tabs.forEach(t => {
+      tabsAfterClone.forEach(t => {
         t.classList.remove('active');
         t.style.background = 'transparent';
         t.style.borderBottomColor = 'transparent';
@@ -217,32 +271,61 @@ function setupTabs(data) {
       tab.classList.add('active');
       tab.style.background = 'white';
       tab.style.borderBottomColor = '#00897B';
-      showTab(tab.dataset.tab, data);
+      
+      // Show the selected tab
+      showTab(tab.dataset.tab);
     });
   });
 }
 
-function showTab(tabName, data) {
+function showTab(tabName) {
   const content = overlay.querySelector('#hmis-content');
   
   switch(tabName) {
     case 'visit':
-      content.innerHTML = renderVisitTab(data);
+      if (currentVisitData) {
+        content.innerHTML = renderVisitTab(currentVisitData);
+      } else {
+        content.innerHTML = '<p style="color: #666; text-align: center; padding: 20px;">No visit data available</p>';
+      }
       break;
     case 'patient':
-      content.innerHTML = renderPatientTab(data.patient_details);
+      if (currentVisitData?.patient_details) {
+        content.innerHTML = renderPatientTab(currentVisitData.patient_details);
+      } else {
+        content.innerHTML = '<p style="color: #666; text-align: center; padding: 20px;">No patient data available</p>';
+      }
       break;
     case 'clinic':
-      content.innerHTML = renderClinicTab(data.clinic_details);
+      if (currentVisitData?.clinic_details) {
+        content.innerHTML = renderClinicTab(currentVisitData.clinic_details);
+      } else {
+        content.innerHTML = '<p style="color: #666; text-align: center; padding: 20px;">No clinic data available</p>';
+      }
       break;
     case 'insurance':
-      content.innerHTML = renderInsuranceTab(data.insurance_scheme_details);
+      if (currentVisitData?.insurance_scheme_details) {
+        content.innerHTML = renderInsuranceTab(currentVisitData.insurance_scheme_details);
+      } else {
+        content.innerHTML = '<p style="color: #666; text-align: center; padding: 20px;">No insurance information available</p>';
+      }
       break;
     case 'dental':
-      content.innerHTML = renderDentalTab(data.dental_treatments);
+      if (currentVisitData?.dental_treatments) {
+        content.innerHTML = renderDentalTab(currentVisitData.dental_treatments);
+      } else {
+        content.innerHTML = '<p style="color: #666; text-align: center; padding: 20px;">No dental treatments recorded</p>';
+      }
       break;
     case 'notes':
-      content.innerHTML = renderNotesTab(data.notes);
+      if (currentVisitData?.notes) {
+        content.innerHTML = renderNotesTab(currentVisitData.notes);
+      } else {
+        content.innerHTML = '<p style="color: #666; text-align: center; padding: 20px;">No notes recorded</p>';
+      }
+      break;
+    case 'settings':
+      renderSettingsTab();
       break;
   }
 }
@@ -439,6 +522,215 @@ function renderNotesTab(notes) {
   `;
 }
 
+function renderSettingsTab() {
+  const content = overlay.querySelector('#hmis-content');
+  
+  // Load current endpoint
+  chrome.storage.local.get(['apiEndpoint'], (result) => {
+    const currentEndpoint = result.apiEndpoint || 'http://localhost:8000';
+    
+    content.innerHTML = `
+      <div style="padding: 0;">
+        <h3 style="margin: 0 0 16px 0; font-size: 14px; color: #00897B;">API Configuration</h3>
+        
+        <form id="hmis-settings-form">
+          <div style="margin-bottom: 16px;">
+            <label style="display: block; margin-bottom: 8px; font-weight: 500; color: #333; font-size: 13px;">
+              API Endpoint Base URL
+            </label>
+            <input 
+              type="text" 
+              id="hmis-api-endpoint" 
+              value="${currentEndpoint}"
+              placeholder="http://localhost:8000 or https://192.168.1.169:8000"
+              style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px; box-sizing: border-box;"
+            />
+            <div id="hmis-endpoint-error" style="color: #d32f2f; font-size: 12px; margin-top: 5px; display: none;"></div>
+            <div style="font-size: 12px; color: #666; margin-top: 5px;">
+              Enter the base URL of your API server. Include the protocol (http:// or https://) and port if needed.
+              <br><br>
+              <strong>Examples:</strong>
+              <ul style="margin: 5px 0; padding-left: 20px;">
+                <li>http://localhost:8000</li>
+                <li>https://192.168.1.169:8000</li>
+                <li>https://api.example.com</li>
+              </ul>
+            </div>
+          </div>
+          
+          <div style="display: flex; gap: 8px;">
+            <button 
+              type="button"
+              id="hmis-test-connection-btn"
+              style="background: #fff; color: #00897B; border: 1px solid #00897B; padding: 10px 20px; border-radius: 4px; font-size: 13px; font-weight: 500; cursor: pointer; flex: 1;"
+            >
+              Test Connection
+            </button>
+            <button 
+              type="submit" 
+              style="background: #00897B; color: white; border: none; padding: 10px 20px; border-radius: 4px; font-size: 13px; font-weight: 500; cursor: pointer; flex: 1;"
+            >
+              Save Settings
+            </button>
+          </div>
+        </form>
+        
+        <div id="hmis-connection-status" style="padding: 12px; border-radius: 4px; margin-top: 16px; display: none; font-size: 13px;"></div>
+        
+        <div id="hmis-settings-success" style="background: #e8f5e9; color: #2e7d32; padding: 12px; border-radius: 4px; margin-top: 16px; display: none; font-size: 13px;">
+          Settings saved successfully!
+        </div>
+        
+        <div style="background: #e3f2fd; border-left: 4px solid #2196F3; padding: 12px; margin-top: 16px; border-radius: 4px; font-size: 12px; color: #1565C0;">
+          <strong>ℹ️ About Certificate Errors</strong>
+          <p style="margin: 5px 0 0 0;">
+            If you're using HTTPS with a self-signed certificate and seeing "ERR_CERT_AUTHORITY_INVALID" errors:
+          </p>
+          <ul style="margin: 5px 0; padding-left: 20px;">
+            <li>Click the certificate error in your browser's address bar</li>
+            <li>Select "Advanced" and then "Proceed to [site] (unsafe)"</li>
+            <li>This will allow the browser to accept the certificate for this session</li>
+            <li>For production, use a valid SSL certificate from a trusted authority</li>
+          </ul>
+        </div>
+      </div>
+    `;
+    
+    // Add form submit handler
+    const form = content.querySelector('#hmis-settings-form');
+    const endpointInput = content.querySelector('#hmis-api-endpoint');
+    const errorDiv = content.querySelector('#hmis-endpoint-error');
+    const successDiv = content.querySelector('#hmis-settings-success');
+    const testBtn = content.querySelector('#hmis-test-connection-btn');
+    const connectionStatus = content.querySelector('#hmis-connection-status');
+    
+    // Test connection button handler
+    testBtn.addEventListener('click', async () => {
+      const endpoint = endpointInput.value.trim();
+      
+      // Hide previous messages
+      errorDiv.style.display = 'none';
+      connectionStatus.style.display = 'none';
+      
+      // Validate endpoint format
+      if (!endpoint) {
+        errorDiv.textContent = 'Please enter an API endpoint first';
+        errorDiv.style.display = 'block';
+        return;
+      }
+      
+      try {
+        const url = new URL(endpoint);
+        if (!['http:', 'https:'].includes(url.protocol)) {
+          throw new Error('Invalid protocol');
+        }
+      } catch (err) {
+        errorDiv.textContent = 'Please enter a valid URL first';
+        errorDiv.style.display = 'block';
+        return;
+      }
+      
+      // Show testing status
+      testBtn.disabled = true;
+      testBtn.textContent = 'Testing...';
+      connectionStatus.style.display = 'block';
+      connectionStatus.style.background = '#fff3e0';
+      connectionStatus.style.color = '#e65100';
+      connectionStatus.innerHTML = '⏳ Testing connection...';
+      
+      try {
+        const baseUrl = endpoint.replace(/\/$/, '');
+        const testUrl = `${baseUrl}/api/visits/summary/by-patient-uuid/test/`;
+        
+        const response = await fetch(testUrl, {
+          method: 'GET',
+          headers: {
+            'Content-Type': 'application/json',
+          }
+        });
+        
+        // If we get here, connection worked (even if 404, it means the server responded)
+        connectionStatus.style.background = '#e8f5e9';
+        connectionStatus.style.color = '#2e7d32';
+        connectionStatus.innerHTML = '✅ Connection successful! The endpoint is reachable.';
+        
+      } catch (err) {
+        let statusMessage = '';
+        let statusColor = '#d32f2f';
+        let statusBg = '#ffebee';
+        
+        if (err.message.includes('Failed to fetch') || err.message.includes('ERR_CERT_AUTHORITY_INVALID')) {
+          statusMessage = '❌ Certificate error detected. You need to accept the certificate in your browser first.';
+          statusMessage += '<br><br><strong>Solution:</strong> Open <a href="' + endpoint + '" target="_blank" style="color: #00897B; text-decoration: underline;">' + endpoint + '</a> in a new tab, accept the certificate warning, then try again.';
+        } else if (err.message.includes('CORS')) {
+          statusMessage = '⚠️ CORS error: The server may not allow requests from this origin.';
+        } else if (err.message.includes('ERR_CONNECTION_REFUSED')) {
+          statusMessage = '❌ Connection refused. Check if the server is running and the URL is correct.';
+        } else {
+          statusMessage = '❌ Connection failed: ' + err.message;
+        }
+        
+        connectionStatus.style.background = statusBg;
+        connectionStatus.style.color = statusColor;
+        connectionStatus.innerHTML = statusMessage;
+      } finally {
+        testBtn.disabled = false;
+        testBtn.textContent = 'Test Connection';
+      }
+    });
+    
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      
+      const endpoint = endpointInput.value.trim();
+      
+      // Hide previous messages
+      errorDiv.style.display = 'none';
+      successDiv.style.display = 'none';
+      
+      // Validate endpoint
+      if (!endpoint) {
+        errorDiv.textContent = 'Please enter an API endpoint';
+        errorDiv.style.display = 'block';
+        return;
+      }
+      
+      // Basic URL validation
+      try {
+        const url = new URL(endpoint);
+        if (!['http:', 'https:'].includes(url.protocol)) {
+          throw new Error('Protocol must be http:// or https://');
+        }
+      } catch (err) {
+        errorDiv.textContent = 'Please enter a valid URL (e.g., http://localhost:8000 or https://192.168.1.169:8000)';
+        errorDiv.style.display = 'block';
+        return;
+      }
+      
+      // Save to storage
+      chrome.storage.local.set({ apiEndpoint: endpoint }, () => {
+        if (chrome.runtime.lastError) {
+          errorDiv.textContent = 'Error saving settings: ' + chrome.runtime.lastError.message;
+          errorDiv.style.display = 'block';
+        } else {
+          successDiv.style.display = 'block';
+          setTimeout(() => {
+            successDiv.style.display = 'none';
+          }, 3000);
+          
+          // Optionally reload the visit data with new endpoint
+          if (currentUuid) {
+            console.log('Settings saved, reloading visit data with new endpoint...');
+            setTimeout(() => {
+              showOverlay(currentUuid, null);
+            }, 500);
+          }
+        }
+      });
+    });
+  });
+}
+
 // ==========================================
 // PART 2: INVENTORY MONITOR INJECTION
 // ==========================================
@@ -483,9 +775,9 @@ function checkAndInjectInventoryMonitor() {
       chrome.storage.local.get(['clinicId', 'clinicName', 'clinicCode', 'patientUuid'], (result) => {
         if (result.clinicId) {
           console.log("Found persisted clinic ID:", result.clinicId);
-          injectInventoryMonitor(() => {
+          injectInventoryMonitor(async () => {
             console.log("Sending persisted clinic data to injected script:", result);
-            sendClinicDataToInjectedScript(result);
+            await sendClinicDataToInjectedScript(result);
           });
         } else {
           console.log("No clinic data in storage yet - will inject when clinic data is available");
@@ -496,10 +788,10 @@ function checkAndInjectInventoryMonitor() {
     } else {
       // Already injected, but make sure clinic data is sent
       console.log("On treatment page - monitor already injected, sending clinic data");
-      chrome.storage.local.get(['clinicId', 'clinicName', 'clinicCode', 'patientUuid'], (result) => {
+      chrome.storage.local.get(['clinicId', 'clinicName', 'clinicCode', 'patientUuid'], async (result) => {
         if (result.clinicId) {
           console.log("Sending persisted clinic data to already-injected script:", result);
-          sendClinicDataToInjectedScript(result);
+          await sendClinicDataToInjectedScript(result);
         }
       });
     }
@@ -517,10 +809,10 @@ function injectInventoryMonitor(onInjectedCallback) {
     // If already injected, still send clinic data if callback provided
     if (onInjectedCallback) {
       setTimeout(() => {
-        chrome.storage.local.get(['clinicId', 'clinicName', 'clinicCode', 'patientUuid'], (result) => {
+        chrome.storage.local.get(['clinicId', 'clinicName', 'clinicCode', 'patientUuid'], async (result) => {
           if (result.clinicId) {
             console.log("Sending stored clinic data to already-injected script:", result);
-            sendClinicDataToInjectedScript(result);
+            await sendClinicDataToInjectedScript(result);
           }
         });
         onInjectedCallback();
@@ -541,10 +833,10 @@ function injectInventoryMonitor(onInjectedCallback) {
     // Wait a bit for the script to initialize
     setTimeout(() => {
       // Send initial clinic data if available
-      chrome.storage.local.get(['clinicId', 'clinicName', 'clinicCode', 'patientUuid'], (result) => {
+      chrome.storage.local.get(['clinicId', 'clinicName', 'clinicCode', 'patientUuid'], async (result) => {
         if (result.clinicId) {
           console.log("Sending stored clinic data to injected script:", result);
-          sendClinicDataToInjectedScript(result);
+          await sendClinicDataToInjectedScript(result);
         } else {
           console.log("No stored clinic data available yet");
         }
@@ -559,12 +851,21 @@ function injectInventoryMonitor(onInjectedCallback) {
   (document.head || document.documentElement).appendChild(script);
 }
 
-function sendClinicDataToInjectedScript(clinicData) {
+async function sendClinicDataToInjectedScript(clinicData) {
+  // Get API endpoint from storage
+  const storage = await new Promise((resolve) => {
+    chrome.storage.local.get(['apiEndpoint'], resolve);
+  });
+  const apiEndpoint = storage.apiEndpoint || 'http://localhost:8000';
+  
   window.postMessage({
     type: 'CLINIC_DATA',
-    data: clinicData
+    data: {
+      ...clinicData,
+      apiEndpoint: apiEndpoint
+    }
   }, '*');
-  console.log("Clinic data sent to injected script:", clinicData);
+  console.log("Clinic data and API endpoint sent to injected script:", { ...clinicData, apiEndpoint });
 }
 
 // Listen for requests from injected script

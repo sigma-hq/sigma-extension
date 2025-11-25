@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      max-width: 600px;
+      margin: 40px auto;
+      padding: 20px;
+      background: #f5f5f5;
+    }
+    .container {
+      background: white;
+      padding: 30px;
+      border-radius: 8px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    }
+    h1 {
+      margin: 0 0 10px 0;
+      color: #00897B;
+      font-size: 24px;
+    }
+    .subtitle {
+      color: #666;
+      margin-bottom: 30px;
+      font-size: 14px;
+    }
+    .form-group {
+      margin-bottom: 20px;
+    }
+    label {
+      display: block;
+      margin-bottom: 8px;
+      font-weight: 500;
+      color: #333;
+      font-size: 14px;
+    }
+    input[type="text"] {
+      width: 100%;
+      padding: 10px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      font-size: 14px;
+      box-sizing: border-box;
+    }
+    input[type="text"]:focus {
+      outline: none;
+      border-color: #00897B;
+    }
+    .help-text {
+      font-size: 12px;
+      color: #666;
+      margin-top: 5px;
+    }
+    .error {
+      color: #d32f2f;
+      font-size: 12px;
+      margin-top: 5px;
+      display: none;
+    }
+    .success {
+      background: #e8f5e9;
+      color: #2e7d32;
+      padding: 12px;
+      border-radius: 4px;
+      margin-top: 20px;
+      display: none;
+      font-size: 14px;
+    }
+    button {
+      background: #00897B;
+      color: white;
+      border: none;
+      padding: 12px 24px;
+      border-radius: 4px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      margin-top: 10px;
+    }
+    button:hover {
+      background: #00796B;
+    }
+    button:active {
+      background: #00695C;
+    }
+    .warning {
+      background: #fff3e0;
+      border-left: 4px solid #ff9800;
+      padding: 12px;
+      margin-top: 20px;
+      border-radius: 4px;
+      font-size: 13px;
+      color: #e65100;
+    }
+    .warning strong {
+      display: block;
+      margin-bottom: 5px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Sigma HMIS Extension Settings</h1>
+    <p class="subtitle">Configure your API endpoint for the extension</p>
+    
+    <form id="optionsForm">
+      <div class="form-group">
+        <label for="apiEndpoint">API Endpoint Base URL</label>
+        <input type="text" id="apiEndpoint" placeholder="http://localhost:8000 or https://192.168.1.169:8000" />
+        <div class="error" id="endpointError"></div>
+        <div class="help-text">
+          Enter the base URL of your API server. Include the protocol (http:// or https://) and port if needed.
+          <br><br>
+          <strong>Examples:</strong>
+          <ul style="margin: 5px 0; padding-left: 20px;">
+            <li>http://localhost:8000</li>
+            <li>https://192.168.1.169:8000</li>
+            <li>https://api.example.com</li>
+          </ul>
+        </div>
+      </div>
+      
+      <button type="submit">Save Settings</button>
+    </form>
+    
+    <div class="success" id="successMessage">Settings saved successfully!</div>
+    
+    <div class="warning">
+      <strong>⚠️ Certificate Errors</strong>
+      If you're using HTTPS with a self-signed certificate and seeing "ERR_CERT_AUTHORITY_INVALID" errors:
+      <ul style="margin: 5px 0; padding-left: 20px;">
+        <li>Click the certificate error in your browser's address bar</li>
+        <li>Select "Advanced" and then "Proceed to [site] (unsafe)"</li>
+        <li>This will allow the browser to accept the certificate for this session</li>
+        <li>For production, use a valid SSL certificate from a trusted authority</li>
+      </ul>
+    </div>
+  </div>
+  
+  <script src="options.js"></script>
+</body>
+</html>
+

@@ -23,13 +23,26 @@
   
     const checkedMedications = new Map();
     let clinicData = null;
+    let apiEndpoint = 'http://localhost:8000'; // Default endpoint
   
     // LISTEN FOR CLINIC DATA FROM CONTENT SCRIPT
     window.addEventListener('message', function(event) {
       if (event.source !== window) return;
       
       if (event.data.type === 'CLINIC_DATA') {
-        clinicData = event.data.data;
+        const receivedData = event.data.data;
+        
+        // Extract API endpoint if provided
+        if (receivedData.apiEndpoint) {
+          apiEndpoint = receivedData.apiEndpoint;
+          console.log("Received API endpoint from content script:", apiEndpoint);
+          // Remove apiEndpoint from clinicData to avoid confusion
+          const { apiEndpoint: _, ...clinicDataOnly } = receivedData;
+          clinicData = clinicDataOnly;
+        } else {
+          clinicData = receivedData;
+        }
+        
         console.log("Received clinic data from content script:", clinicData);
         console.log("CLINIC ID RECEIVED IN INJECTED SCRIPT:", clinicData?.clinicId);
         
@@ -153,8 +166,9 @@
       }
       
       try {
-        // Build the new API endpoint
-        const endpoint = `http://localhost:8000/api/inventory/location/by-drug-uuid/?drug_uuid=${medData.drugUuid}&clinic_id=${clinicData.clinicId}`;
+        // Use API endpoint received from content script (or default)
+        const baseUrl = apiEndpoint.replace(/\/$/, '');
+        const endpoint = `${baseUrl}/api/inventory/location/by-drug-uuid/?drug_uuid=${medData.drugUuid}&clinic_id=${clinicData.clinicId}`;
         
         console.log("Calling inventory API:", endpoint);
         
@@ -206,6 +220,12 @@
         return data;
       } catch (err) {
         console.error("Inventory check failed:", err);
+        
+        // Provide more helpful error messages
+        if (err.message.includes('Failed to fetch') || err.message.includes('ERR_CERT_AUTHORITY_INVALID')) {
+          console.error("Certificate or connection error. Check your API endpoint configuration in extension options.");
+        }
+        
         showAPIError(medData);
         return null;
       }
