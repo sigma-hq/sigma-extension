@@ -558,20 +558,31 @@ function renderSettingsTab() {
             </div>
           </div>
           
-          <button 
-            type="submit" 
-            style="background: #00897B; color: white; border: none; padding: 10px 20px; border-radius: 4px; font-size: 13px; font-weight: 500; cursor: pointer; width: 100%;"
-          >
-            Save Settings
-          </button>
+          <div style="display: flex; gap: 8px;">
+            <button 
+              type="button"
+              id="hmis-test-connection-btn"
+              style="background: #fff; color: #00897B; border: 1px solid #00897B; padding: 10px 20px; border-radius: 4px; font-size: 13px; font-weight: 500; cursor: pointer; flex: 1;"
+            >
+              Test Connection
+            </button>
+            <button 
+              type="submit" 
+              style="background: #00897B; color: white; border: none; padding: 10px 20px; border-radius: 4px; font-size: 13px; font-weight: 500; cursor: pointer; flex: 1;"
+            >
+              Save Settings
+            </button>
+          </div>
         </form>
+        
+        <div id="hmis-connection-status" style="padding: 12px; border-radius: 4px; margin-top: 16px; display: none; font-size: 13px;"></div>
         
         <div id="hmis-settings-success" style="background: #e8f5e9; color: #2e7d32; padding: 12px; border-radius: 4px; margin-top: 16px; display: none; font-size: 13px;">
           Settings saved successfully!
         </div>
         
-        <div style="background: #fff3e0; border-left: 4px solid #ff9800; padding: 12px; margin-top: 16px; border-radius: 4px; font-size: 12px; color: #e65100;">
-          <strong>⚠️ Certificate Errors</strong>
+        <div style="background: #e3f2fd; border-left: 4px solid #2196F3; padding: 12px; margin-top: 16px; border-radius: 4px; font-size: 12px; color: #1565C0;">
+          <strong>ℹ️ About Certificate Errors</strong>
           <p style="margin: 5px 0 0 0;">
             If you're using HTTPS with a self-signed certificate and seeing "ERR_CERT_AUTHORITY_INVALID" errors:
           </p>
@@ -590,6 +601,83 @@ function renderSettingsTab() {
     const endpointInput = content.querySelector('#hmis-api-endpoint');
     const errorDiv = content.querySelector('#hmis-endpoint-error');
     const successDiv = content.querySelector('#hmis-settings-success');
+    const testBtn = content.querySelector('#hmis-test-connection-btn');
+    const connectionStatus = content.querySelector('#hmis-connection-status');
+    
+    // Test connection button handler
+    testBtn.addEventListener('click', async () => {
+      const endpoint = endpointInput.value.trim();
+      
+      // Hide previous messages
+      errorDiv.style.display = 'none';
+      connectionStatus.style.display = 'none';
+      
+      // Validate endpoint format
+      if (!endpoint) {
+        errorDiv.textContent = 'Please enter an API endpoint first';
+        errorDiv.style.display = 'block';
+        return;
+      }
+      
+      try {
+        const url = new URL(endpoint);
+        if (!['http:', 'https:'].includes(url.protocol)) {
+          throw new Error('Invalid protocol');
+        }
+      } catch (err) {
+        errorDiv.textContent = 'Please enter a valid URL first';
+        errorDiv.style.display = 'block';
+        return;
+      }
+      
+      // Show testing status
+      testBtn.disabled = true;
+      testBtn.textContent = 'Testing...';
+      connectionStatus.style.display = 'block';
+      connectionStatus.style.background = '#fff3e0';
+      connectionStatus.style.color = '#e65100';
+      connectionStatus.innerHTML = '⏳ Testing connection...';
+      
+      try {
+        const baseUrl = endpoint.replace(/\/$/, '');
+        const testUrl = `${baseUrl}/api/visits/summary/by-patient-uuid/test/`;
+        
+        const response = await fetch(testUrl, {
+          method: 'GET',
+          headers: {
+            'Content-Type': 'application/json',
+          }
+        });
+        
+        // If we get here, connection worked (even if 404, it means the server responded)
+        connectionStatus.style.background = '#e8f5e9';
+        connectionStatus.style.color = '#2e7d32';
+        connectionStatus.innerHTML = '✅ Connection successful! The endpoint is reachable.';
+        
+      } catch (err) {
+        let statusMessage = '';
+        let statusColor = '#d32f2f';
+        let statusBg = '#ffebee';
+        
+        if (err.message.includes('Failed to fetch') || err.message.includes('ERR_CERT_AUTHORITY_INVALID')) {
+          statusMessage = '❌ Certificate error detected. You need to accept the certificate in your browser first.';
+          statusMessage += '<br><br><strong>Solution:</strong> Open <a href="' + endpoint + '" target="_blank" style="color: #00897B; text-decoration: underline;">' + endpoint + '</a> in a new tab, accept the certificate warning, then try again.';
+        } else if (err.message.includes('CORS')) {
+          statusMessage = '⚠️ CORS error: The server may not allow requests from this origin.';
+        } else if (err.message.includes('ERR_CONNECTION_REFUSED')) {
+          statusMessage = '❌ Connection refused. Check if the server is running and the URL is correct.';
+        } else {
+          statusMessage = '❌ Connection failed: ' + err.message;
+        }
+        
+        connectionStatus.style.background = statusBg;
+        connectionStatus.style.color = statusColor;
+        connectionStatus.innerHTML = statusMessage;
+      } finally {
+        testBtn.disabled = false;
+        testBtn.textContent = 'Test Connection';
+      }
+    });
     
     form.addEventListener('submit', (e) => {
       e.preventDefault();
