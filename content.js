@@ -112,7 +112,19 @@ async function showOverlay(uuid, displayId) {
   });
 
   try {
-    const res = await fetch(`http://localhost:8000/api/visits/summary/by-patient-uuid/${uuid}/`);
+    // Get API endpoint from storage (default to localhost if not set)
+    const storage = await new Promise((resolve) => {
+      chrome.storage.local.get(['apiEndpoint'], resolve);
+    });
+    const apiEndpoint = storage.apiEndpoint || 'http://localhost:8000';
+    
+    // Remove trailing slash if present
+    const baseUrl = apiEndpoint.replace(/\/$/, '');
+    const url = `${baseUrl}/api/visits/summary/by-patient-uuid/${uuid}/`;
+    
+    console.log("Fetching visit summary from:", url);
+    
+    const res = await fetch(url);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
 
@@ -155,12 +167,14 @@ async function showOverlay(uuid, displayId) {
               clinicId: clinicId,
               clinicName: clinicName
             });
-            sendClinicDataToInjectedScript({
-              clinicId: clinicId,
-              clinicName: clinicName,
-              clinicCode: clinicCode,
-              patientUuid: uuid
-            });
+            (async () => {
+              await sendClinicDataToInjectedScript({
+                clinicId: clinicId,
+                clinicName: clinicName,
+                clinicCode: clinicCode,
+                patientUuid: uuid
+              });
+            })();
           });
         } else {
           console.log("Not on treatment page - clinic data saved for later use");
@@ -195,12 +209,39 @@ async function showOverlay(uuid, displayId) {
     showTab('visit', data);
 
   } catch (err) {
+    let errorMessage = err.message;
+    
+    // Provide helpful error messages for common issues
+    if (err.message.includes('Failed to fetch') || err.message.includes('ERR_CERT_AUTHORITY_INVALID')) {
+      errorMessage = 'Certificate error or connection failed. If using HTTPS with a self-signed certificate, you may need to accept it in your browser first. Check the extension options to configure your API endpoint.';
+    } else if (err.message.includes('CORS')) {
+      errorMessage = 'CORS error: The API server may not allow requests from this origin.';
+    }
+    
     overlay.querySelector('#hmis-content').innerHTML = `
       <div style="color:#d32f2f; padding:12px; background:#ffebee; border-radius:4px;">
         <strong>Failed to load summary</strong><br/>
-        <small>${err.message}</small>
+        <small>${errorMessage}</small><br/>
+        <small style="margin-top:8px; display:block;">
+          <a href="#" id="configure-endpoint-link" style="color:#00897B; text-decoration:underline; cursor:pointer;">Configure API endpoint</a>
+        </small>
       </div>
     `;
+    
+    // Add click handler for the configure link
+    const configureLink = overlay.querySelector('#configure-endpoint-link');
+    if (configureLink) {
+      configureLink.addEventListener('click', (e) => {
+        e.preventDefault();
+        // Send message to background script to open options page
+        chrome.runtime.sendMessage({ action: 'openOptions' }, (response) => {
+          if (chrome.runtime.lastError) {
+            console.error('Error opening options page:', chrome.runtime.lastError);
+          }
+        });
+      });
+    }
+    
     console.error("Error fetching visit summary:", err);
   }
 }
@@ -483,9 +524,9 @@ function checkAndInjectInventoryMonitor() {
       chrome.storage.local.get(['clinicId', 'clinicName', 'clinicCode', 'patientUuid'], (result) => {
         if (result.clinicId) {
           console.log("Found persisted clinic ID:", result.clinicId);
-          injectInventoryMonitor(() => {
+          injectInventoryMonitor(async () => {
             console.log("Sending persisted clinic data to injected script:", result);
-            sendClinicDataToInjectedScript(result);
+            await sendClinicDataToInjectedScript(result);
           });
         } else {
           console.log("No clinic data in storage yet - will inject when clinic data is available");
@@ -496,10 +537,10 @@ function checkAndInjectInventoryMonitor() {
     } else {
       // Already injected, but make sure clinic data is sent
       console.log("On treatment page - monitor already injected, sending clinic data");
-      chrome.storage.local.get(['clinicId', 'clinicName', 'clinicCode', 'patientUuid'], (result) => {
+      chrome.storage.local.get(['clinicId', 'clinicName', 'clinicCode', 'patientUuid'], async (result) => {
         if (result.clinicId) {
           console.log("Sending persisted clinic data to already-injected script:", result);
-          sendClinicDataToInjectedScript(result);
+          await sendClinicDataToInjectedScript(result);
         }
       });
     }
@@ -517,10 +558,10 @@ function injectInventoryMonitor(onInjectedCallback) {
     // If already injected, still send clinic data if callback provided
     if (onInjectedCallback) {
       setTimeout(() => {
-        chrome.storage.local.get(['clinicId', 'clinicName', 'clinicCode', 'patientUuid'], (result) => {
+        chrome.storage.local.get(['clinicId', 'clinicName', 'clinicCode', 'patientUuid'], async (result) => {
           if (result.clinicId) {
             console.log("Sending stored clinic data to already-injected script:", result);
-            sendClinicDataToInjectedScript(result);
+            await sendClinicDataToInjectedScript(result);
           }
         });
         onInjectedCallback();
@@ -541,10 +582,10 @@ function injectInventoryMonitor(onInjectedCallback) {
     // Wait a bit for the script to initialize
     setTimeout(() => {
       // Send initial clinic data if available
-      chrome.storage.local.get(['clinicId', 'clinicName', 'clinicCode', 'patientUuid'], (result) => {
+      chrome.storage.local.get(['clinicId', 'clinicName', 'clinicCode', 'patientUuid'], async (result) => {
         if (result.clinicId) {
           console.log("Sending stored clinic data to injected script:", result);
-          sendClinicDataToInjectedScript(result);
+          await sendClinicDataToInjectedScript(result);
         } else {
           console.log("No stored clinic data available yet");
         }
@@ -559,12 +600,21 @@ function injectInventoryMonitor(onInjectedCallback) {
   (document.head || document.documentElement).appendChild(script);
 }
 
-function sendClinicDataToInjectedScript(clinicData) {
+async function sendClinicDataToInjectedScript(clinicData) {
+  // Get API endpoint from storage
+  const storage = await new Promise((resolve) => {
+    chrome.storage.local.get(['apiEndpoint'], resolve);
+  });
+  const apiEndpoint = storage.apiEndpoint || 'http://localhost:8000';
+  
   window.postMessage({
     type: 'CLINIC_DATA',
-    data: clinicData
+    data: {
+      ...clinicData,
+      apiEndpoint: apiEndpoint
+    }
   }, '*');
-  console.log("Clinic data sent to injected script:", clinicData);
+  console.log("Clinic data and API endpoint sent to injected script:", { ...clinicData, apiEndpoint });
 }
 
 // Listen for requests from injected script

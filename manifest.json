@@ -3,6 +3,10 @@
     "name": "Sigma HMIS & Inventory Helper",
     "version": "1.0.0",
     "description": "Patient info & inventory monitoring for Bahmni",
+    "options_page": "options.html",
+    "background": {
+      "service_worker": "background.js"
+    },
     "content_scripts": [
       {
         "matches": ["<all_urls>"],
