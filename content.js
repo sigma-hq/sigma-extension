@@ -1234,9 +1234,29 @@ function setupOrderingHandlers(container, clinicId, visitId, locations) {
       
       const data = await response.json();
       console.log('[Ordering] Products loaded successfully:', data);
-      console.log('[Ordering] Number of products:', Array.isArray(data) ? data.length : 'Not an array');
+      console.log('[Ordering] Data type:', typeof data);
+      console.log('[Ordering] Is array:', Array.isArray(data));
       
-      products = Array.isArray(data) ? data : [];
+      // Handle response format: API returns { location: {...}, products: [...], total_products: N }
+      if (Array.isArray(data)) {
+        products = data;
+      } else if (data.products && Array.isArray(data.products)) {
+        // Response is wrapped in an object with 'products' key
+        products = data.products;
+        console.log('[Ordering] Extracted products from data.products:', products.length);
+      } else if (data.results && Array.isArray(data.results)) {
+        // Paginated response
+        products = data.results;
+      } else {
+        console.warn('[Ordering] Unexpected response format:', data);
+        products = [];
+      }
+      
+      console.log('[Ordering] Products array length:', products.length);
+      if (products.length > 0) {
+        console.log('[Ordering] First product:', products[0]);
+      }
+      
       renderProductsList();
       
     } catch (err) {
@@ -1283,11 +1303,20 @@ function setupOrderingHandlers(container, clinicId, visitId, locations) {
   // Render products list
   function renderProductsList() {
     const searchTerm = productSearch.value.toLowerCase();
-    const filtered = products.filter(p => 
-      !searchTerm || 
-      (p.product_name || '').toLowerCase().includes(searchTerm) ||
-      (p.product_code || '').toLowerCase().includes(searchTerm)
-    );
+    // Get product IDs that are already in the cart
+    const cartProductIds = new Set(cart.map(item => item.product_id));
+    
+    const filtered = products.filter(p => {
+      // Filter out products already in cart
+      if (cartProductIds.has(p.product_id)) {
+        return false;
+      }
+      // Apply search filter
+      if (!searchTerm) return true;
+      const nameMatch = (p.product_name || '').toLowerCase().includes(searchTerm);
+      const codeMatch = (p.product_code || '').toLowerCase().includes(searchTerm);
+      return nameMatch || codeMatch;
+    });
     
     if (filtered.length === 0) {
       productsList.innerHTML = '<p style="text-align: center; color: #666;">No products found</p>';
@@ -1333,6 +1362,7 @@ function setupOrderingHandlers(container, clinicId, visitId, locations) {
         }
         
         updateCart();
+        renderProductsList(); // Refresh products list to remove added item
       });
     });
   }
@@ -1392,6 +1422,7 @@ function setupOrderingHandlers(container, clinicId, visitId, locations) {
             cart.splice(index, 1);
           }
           updateCart();
+          renderProductsList(); // Refresh products list if item was removed
         });
       });
       
@@ -1400,6 +1431,7 @@ function setupOrderingHandlers(container, clinicId, visitId, locations) {
           const index = parseInt(e.target.dataset.index);
           cart.splice(index, 1);
           updateCart();
+          renderProductsList(); // Refresh products list to show removed item
         });
       });
       
