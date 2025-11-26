@@ -1373,11 +1373,20 @@ function setupOrderingHandlers(container, clinicId, visitId) {
       </div>
     `).join('');
     
-    // Add click handlers
+    // Add click handlers - remove old listeners first to prevent duplicates
     productsList.querySelectorAll('.hmis-add-product-btn').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const productId = parseInt(btn.dataset.productId); // This is Odoo product ID
-        const productName = btn.dataset.productName;
+      // Clone button to remove all existing event listeners
+      const newBtn = btn.cloneNode(true);
+      btn.parentNode.replaceChild(newBtn, btn);
+      
+      newBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        
+        const productId = parseInt(newBtn.dataset.productId); // This is Odoo product ID
+        const productName = newBtn.dataset.productName;
+        
+        console.log('[Ordering] Add button clicked for product:', productId, productName);
 
         // Find full product to get price
         const product = products.find(
@@ -1390,8 +1399,10 @@ function setupOrderingHandlers(container, clinicId, visitId) {
         // Check if already in cart
         const existing = cart.find(item => item.product_id === productId);
         if (existing) {
+          console.log('[Ordering] Product already in cart, incrementing quantity from', existing.quantity, 'to', existing.quantity + 1);
           existing.quantity += 1;
         } else {
+          console.log('[Ordering] Adding new product to cart:', productId, productName, 'quantity: 1');
           cart.push({
             product_id: productId, // Store Odoo product ID for dispensation
             product_name: productName,
@@ -1400,6 +1411,7 @@ function setupOrderingHandlers(container, clinicId, visitId) {
           });
         }
         
+        console.log('[Ordering] Cart after add:', JSON.stringify(cart, null, 2));
         updateCart();
         renderProductsList(); // Refresh products list to remove added item
       });
@@ -1527,9 +1539,14 @@ function setupOrderingHandlers(container, clinicId, visitId) {
       
       console.log('[API] Calling endpoint: POST', url);
       console.log('[Ordering] Submitting dispensation to:', baseUrl);
-      // Get pricelist_id from visit data
-      const pricelistId = currentVisitData?.pricelist?.id || null;
-      console.log('[Ordering] Pricelist ID:', pricelistId);
+      // Get pricelist_id from visit data - check multiple possible locations
+      const pricelistId = currentVisitData?.pricelist?.id || 
+                         currentVisitData?.pricelist_id || 
+                         null;
+      
+      console.log('[Ordering] Current visit data:', JSON.stringify(currentVisitData, null, 2));
+      console.log('[Ordering] Pricelist ID extracted:', pricelistId);
+      console.log('[Ordering] Pricelist object:', currentVisitData?.pricelist);
       
       const payload = {
         clinic_id: clinicId,
@@ -1541,9 +1558,16 @@ function setupOrderingHandlers(container, clinicId, visitId) {
         })),
         notes: dispenseNotes.value.trim() || 'Dispensed via helper',
         sales_order_id: null,
-        location_id: selectedLocationId ? parseInt(selectedLocationId) : null,
-        pricelist_id: pricelistId
+        location_id: selectedLocationId ? parseInt(selectedLocationId) : null
       };
+      
+      // Only include pricelist_id if it exists (don't send null)
+      if (pricelistId) {
+        payload.pricelist_id = pricelistId;
+        console.log('[Ordering] Including pricelist_id in payload:', pricelistId);
+      } else {
+        console.warn('[Ordering] No pricelist_id found in visit data - not including in payload');
+      }
       
       console.log('[Ordering] Dispensation payload:', JSON.stringify(payload, null, 2));
       
@@ -1566,13 +1590,22 @@ function setupOrderingHandlers(container, clinicId, visitId) {
           <small>Items have been dispensed and sales order created/updated.</small>
         `;
         
-        // Clear cart
-        cart = [];
+        // Clear cart completely - use length = 0 to maintain reference
+        console.log('[Ordering] Clearing cart after successful submission. Cart before clear:', cart.length, 'items');
+        console.log('[Ordering] Cart contents before clear:', JSON.stringify(cart, null, 2));
+        cart.length = 0; // Clear array in place to ensure all references see the cleared cart
+        console.log('[Ordering] Cart after clear:', cart.length, 'items');
+        console.log('[Ordering] Cart contents after clear:', JSON.stringify(cart, null, 2));
+        
         updateCart();
         dispenseNotes.value = '';
         
-        // Reload products to refresh catalog
+        // Reload products to refresh catalog and re-render list (this will show all products again since cart is empty)
         await loadAllProducts();
+        
+        // Double-check: ensure products list is refreshed to show all products (cart is now empty)
+        console.log('[Ordering] Re-rendering products list after cart clear. Cart length:', cart.length);
+        renderProductsList();
         
       } else if (response.status === 400) {
         const errorData = await response.json();
