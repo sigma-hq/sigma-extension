@@ -6,6 +6,141 @@ let isCollapsed = false;
 let currentVisitData = null;
 
 // ==========================================
+// AUTHENTICATION STATE & HELPERS
+// ==========================================
+
+let authTokens = {
+  access: null,
+  refresh: null
+};
+
+// Load tokens from storage
+async function loadAuthTokens() {
+  return new Promise((resolve) => {
+    chrome.storage.local.get(['authAccess', 'authRefresh'], (result) => {
+      authTokens.access = result.authAccess || null;
+      authTokens.refresh = result.authRefresh || null;
+      resolve(authTokens);
+    });
+  });
+}
+
+// Save tokens to storage
+async function saveAuthTokens(access, refresh) {
+  authTokens.access = access;
+  authTokens.refresh = refresh;
+  return new Promise((resolve) => {
+    chrome.storage.local.set({
+      authAccess: access,
+      authRefresh: refresh
+    }, resolve);
+  });
+}
+
+// Clear tokens
+async function clearAuthTokens() {
+  authTokens.access = null;
+  authTokens.refresh = null;
+  return new Promise((resolve) => {
+    chrome.storage.local.remove(['authAccess', 'authRefresh'], resolve);
+  });
+}
+
+// Check if authenticated
+async function isAuthenticated() {
+  await loadAuthTokens();
+  if (!authTokens.access) return false;
+  
+  // Verify token is still valid
+  try {
+    const storage = await new Promise((resolve) => {
+      chrome.storage.local.get(['apiEndpoint'], resolve);
+    });
+    const apiEndpoint = storage.apiEndpoint || 'http://localhost:8000';
+    const baseUrl = apiEndpoint.replace(/\/$/, '');
+    
+    const response = await fetch(`${baseUrl}/api/token/verify/`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: authTokens.access })
+    });
+    
+    return response.ok;
+  } catch (err) {
+    return false;
+  }
+}
+
+// Refresh access token
+async function refreshAccessToken() {
+  if (!authTokens.refresh) {
+    throw new Error('No refresh token available');
+  }
+  
+  const storage = await new Promise((resolve) => {
+    chrome.storage.local.get(['apiEndpoint'], resolve);
+  });
+  const apiEndpoint = storage.apiEndpoint || 'http://localhost:8000';
+  const baseUrl = apiEndpoint.replace(/\/$/, '');
+  
+  const response = await fetch(`${baseUrl}/api/token/refresh/`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ refresh: authTokens.refresh })
+  });
+  
+  if (!response.ok) {
+    await clearAuthTokens();
+    throw new Error('Token refresh failed');
+  }
+  
+  const data = await response.json();
+  await saveAuthTokens(data.access, data.refresh || authTokens.refresh);
+  return data.access;
+}
+
+// Get authenticated fetch headers
+async function getAuthHeaders() {
+  await loadAuthTokens();
+  
+  if (!authTokens.access) {
+    return {};
+  }
+  
+  return {
+    'Authorization': `Bearer ${authTokens.access}`,
+    'Content-Type': 'application/json'
+  };
+}
+
+// Authenticated fetch with auto-refresh
+async function authenticatedFetch(url, options = {}) {
+  await loadAuthTokens();
+  
+  // Add auth header
+  const headers = await getAuthHeaders();
+  options.headers = { ...headers, ...options.headers };
+  
+  let response = await fetch(url, options);
+  
+  // If 401, try to refresh token
+  if (response.status === 401 && authTokens.refresh) {
+    try {
+      const newAccess = await refreshAccessToken();
+      // Retry with new token
+      options.headers['Authorization'] = `Bearer ${newAccess}`;
+      response = await fetch(url, options);
+    } catch (err) {
+      // Refresh failed, clear tokens
+      await clearAuthTokens();
+      throw new Error('Authentication expired. Please login again.');
+    }
+  }
+  
+  return response;
+}
+
+// ==========================================
 // PART 1: PATIENT DATA EXTRACTION & OVERLAY
 // ==========================================
 
@@ -69,6 +204,7 @@ async function showOverlay(uuid, displayId) {
         <button class="hmis-tab" data-tab="insurance" style="flex:1; padding:10px; border:none; background:transparent; cursor:pointer; font-size:13px; font-weight:500; border-bottom: 2px solid transparent; display:none; outline:none;">Insurance</button>
         <button class="hmis-tab" data-tab="dental" style="flex:1; padding:10px; border:none; background:transparent; cursor:pointer; font-size:13px; font-weight:500; border-bottom: 2px solid transparent; display:none; outline:none;">Dental</button>
         <button class="hmis-tab" data-tab="notes" style="flex:1; padding:10px; border:none; background:transparent; cursor:pointer; font-size:13px; font-weight:500; border-bottom: 2px solid transparent; display:none; outline:none;">Notes</button>
+        <button class="hmis-tab" data-tab="ordering" style="flex:1; padding:10px; border:none; background:transparent; cursor:pointer; font-size:13px; font-weight:500; border-bottom: 2px solid transparent; outline:none;">💊 Ordering</button>
         <button class="hmis-tab" data-tab="settings" style="flex:1; padding:10px; border:none; background:transparent; cursor:pointer; font-size:13px; font-weight:500; border-bottom: 2px solid transparent; outline:none;">⚙ Settings</button>
       </div>
 
@@ -150,7 +286,20 @@ async function showOverlay(uuid, displayId) {
     
     console.log("Fetching visit summary from:", url);
     
-    const res = await fetch(url);
+    // Try authenticated fetch if token available, otherwise regular fetch
+    let res;
+    await loadAuthTokens();
+    if (authTokens.access) {
+      try {
+        res = await authenticatedFetch(url);
+      } catch (err) {
+        // If auth fails, try without auth (for backward compatibility)
+        res = await fetch(url);
+      }
+    } else {
+      res = await fetch(url);
+    }
+    
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
 
@@ -326,6 +475,9 @@ function showTab(tabName) {
       break;
     case 'settings':
       renderSettingsTab();
+      break;
+    case 'ordering':
+      renderOrderingTab();
       break;
   }
 }
@@ -731,6 +883,530 @@ function renderSettingsTab() {
   });
 }
 
+function renderOrderingTab() {
+  const content = overlay.querySelector('#hmis-content');
+  
+  // Check authentication first
+  isAuthenticated().then(authenticated => {
+    if (!authenticated) {
+      // Show login form
+      renderLoginForm(content);
+    } else {
+      // Show ordering interface
+      renderOrderingInterface(content);
+    }
+  });
+}
+
+function renderLoginForm(container) {
+  container.innerHTML = `
+    <div style="padding: 0;">
+      <h3 style="margin: 0 0 16px 0; font-size: 14px; color: #00897B;">Authentication Required</h3>
+      <p style="font-size: 12px; color: #666; margin-bottom: 16px;">
+        Please login to access ordering and billing functionality.
+      </p>
+      
+      <form id="hmis-login-form">
+        <div style="margin-bottom: 16px;">
+          <label style="display: block; margin-bottom: 8px; font-weight: 500; color: #333; font-size: 13px;">
+            Email
+          </label>
+          <input 
+            type="email" 
+            id="hmis-login-email" 
+            required
+            placeholder="your.email@example.com"
+            style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px; box-sizing: border-box;"
+          />
+        </div>
+        
+        <div style="margin-bottom: 16px;">
+          <label style="display: block; margin-bottom: 8px; font-weight: 500; color: #333; font-size: 13px;">
+            Password
+          </label>
+          <input 
+            type="password" 
+            id="hmis-login-password" 
+            required
+            placeholder="Enter your password"
+            style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px; box-sizing: border-box;"
+          />
+        </div>
+        
+        <button 
+          type="submit" 
+          style="background: #00897B; color: white; border: none; padding: 10px 20px; border-radius: 4px; font-size: 13px; font-weight: 500; cursor: pointer; width: 100%;"
+        >
+          Login
+        </button>
+      </form>
+      
+      <div id="hmis-login-error" style="color: #d32f2f; font-size: 12px; margin-top: 12px; display: none;"></div>
+      <div id="hmis-login-success" style="background: #e8f5e9; color: #2e7d32; padding: 12px; border-radius: 4px; margin-top: 16px; display: none; font-size: 13px;">
+        Login successful! Loading ordering interface...
+      </div>
+    </div>
+  `;
+  
+  const form = container.querySelector('#hmis-login-form');
+  const errorDiv = container.querySelector('#hmis-login-error');
+  const successDiv = container.querySelector('#hmis-login-success');
+  
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    
+    errorDiv.style.display = 'none';
+    successDiv.style.display = 'none';
+    
+    const email = container.querySelector('#hmis-login-email').value.trim();
+    const password = container.querySelector('#hmis-login-password').value;
+    
+    if (!email || !password) {
+      errorDiv.textContent = 'Please enter both email and password';
+      errorDiv.style.display = 'block';
+      return;
+    }
+    
+    try {
+      const storage = await new Promise((resolve) => {
+        chrome.storage.local.get(['apiEndpoint'], resolve);
+      });
+      const apiEndpoint = storage.apiEndpoint || 'http://localhost:8000';
+      const baseUrl = apiEndpoint.replace(/\/$/, '');
+      
+      const response = await fetch(`${baseUrl}/api/token/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password })
+      });
+      
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.detail || 'Login failed. Please check your credentials.');
+      }
+      
+      const data = await response.json();
+      await saveAuthTokens(data.access, data.refresh);
+      
+      successDiv.style.display = 'block';
+      
+      // Reload ordering interface after successful login
+      setTimeout(() => {
+        renderOrderingInterface(container);
+      }, 1000);
+      
+    } catch (err) {
+      errorDiv.textContent = err.message || 'Login failed. Please try again.';
+      errorDiv.style.display = 'block';
+    }
+  });
+}
+
+async function renderOrderingInterface(container) {
+  // Check if we have visit data
+  if (!currentVisitData) {
+    container.innerHTML = `
+      <div style="padding: 20px; text-align: center; color: #666;">
+        <p>Please wait for visit data to load, or navigate to a patient page.</p>
+      </div>
+    `;
+    return;
+  }
+  
+  const clinicId = currentVisitData.clinic_id || currentVisitData.clinic_details?.id || currentVisitData.clinic?.id;
+  const visitId = currentVisitData.visit_id || currentVisitData.id;
+  
+  if (!clinicId) {
+    container.innerHTML = `
+      <div style="padding: 20px; text-align: center; color: #d32f2f;">
+        <p>No clinic information available. Cannot proceed with ordering.</p>
+      </div>
+    `;
+    return;
+  }
+  
+  // Load locations
+  let locations = [];
+  let selectedLocationId = null;
+  let products = [];
+  let cartItems = [];
+  
+  try {
+    const storage = await new Promise((resolve) => {
+      chrome.storage.local.get(['apiEndpoint'], resolve);
+    });
+    const apiEndpoint = storage.apiEndpoint || 'http://localhost:8000';
+    const baseUrl = apiEndpoint.replace(/\/$/, '');
+    
+    const locationsResponse = await authenticatedFetch(`${baseUrl}/api/locations/?clinic=${clinicId}`);
+    if (locationsResponse.ok) {
+      locations = await locationsResponse.json();
+    }
+  } catch (err) {
+    console.error('Error loading locations:', err);
+  }
+  
+  // Render the interface
+  container.innerHTML = `
+    <div style="padding: 0;">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+        <h3 style="margin: 0; font-size: 14px; color: #00897B;">Ordering & Billing</h3>
+        <button id="hmis-logout-btn" style="background: #f44336; color: white; border: none; padding: 6px 12px; border-radius: 4px; font-size: 11px; cursor: pointer;">
+          Logout
+        </button>
+      </div>
+      
+      <div style="margin-bottom: 16px;">
+        <label style="display: block; margin-bottom: 8px; font-weight: 500; color: #333; font-size: 13px;">
+          Select Location (Pharmacy/Dispensing)
+        </label>
+        <select id="hmis-location-select" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px; box-sizing: border-box;">
+          <option value="">-- Select Location --</option>
+          ${locations.map(loc => `<option value="${loc.id}">${loc.name || loc.code || `Location ${loc.id}`}</option>`).join('')}
+        </select>
+      </div>
+      
+      <div id="hmis-products-section" style="display: none; margin-bottom: 16px;">
+        <label style="display: block; margin-bottom: 8px; font-weight: 500; color: #333; font-size: 13px;">
+          Search Products
+        </label>
+        <div style="display: flex; gap: 8px;">
+          <input 
+            type="text" 
+            id="hmis-product-search" 
+            placeholder="Search products..."
+            style="flex: 1; padding: 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px; box-sizing: border-box;"
+          />
+          <button 
+            id="hmis-load-products-btn"
+            style="background: #00897B; color: white; border: none; padding: 10px 16px; border-radius: 4px; font-size: 13px; cursor: pointer; white-space: nowrap;"
+          >
+            Load Products
+          </button>
+        </div>
+        
+        <div id="hmis-products-list" style="margin-top: 12px; max-height: 200px; overflow-y: auto; border: 1px solid #e0e0e0; border-radius: 4px; padding: 8px;">
+          <!-- Products will be loaded here -->
+        </div>
+      </div>
+      
+      <div id="hmis-cart-section" style="margin-top: 16px;">
+        <h4 style="margin: 0 0 12px 0; font-size: 13px; color: #00897B;">Items to Dispense</h4>
+        <div id="hmis-cart-items" style="border: 1px solid #e0e0e0; border-radius: 4px; padding: 12px; min-height: 60px;">
+          <p style="color: #999; text-align: center; margin: 0;">No items added yet</p>
+        </div>
+        
+        <div style="margin-top: 12px;">
+          <label style="display: block; margin-bottom: 8px; font-weight: 500; color: #333; font-size: 13px;">
+            Notes (Optional)
+          </label>
+          <textarea 
+            id="hmis-dispense-notes" 
+            placeholder="Additional notes for this dispensation..."
+            style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px; box-sizing: border-box; min-height: 60px; resize: vertical;"
+          ></textarea>
+        </div>
+        
+        <button 
+          id="hmis-submit-dispense-btn"
+          disabled
+          style="background: #00897B; color: white; border: none; padding: 12px 24px; border-radius: 4px; font-size: 13px; font-weight: 500; cursor: pointer; width: 100%; margin-top: 16px; opacity: 0.5;"
+        >
+          Submit Dispensation
+        </button>
+      </div>
+      
+      <div id="hmis-dispense-status" style="margin-top: 16px; display: none;"></div>
+    </div>
+  `;
+  
+  // Setup event handlers
+  setupOrderingHandlers(container, clinicId, visitId, locations);
+}
+
+function setupOrderingHandlers(container, clinicId, visitId, locations) {
+  const locationSelect = container.querySelector('#hmis-location-select');
+  const productsSection = container.querySelector('#hmis-products-section');
+  const loadProductsBtn = container.querySelector('#hmis-load-products-btn');
+  const productSearch = container.querySelector('#hmis-product-search');
+  const productsList = container.querySelector('#hmis-products-list');
+  const cartItems = container.querySelector('#hmis-cart-items');
+  const submitBtn = container.querySelector('#hmis-submit-dispense-btn');
+  const dispenseNotes = container.querySelector('#hmis-dispense-notes');
+  const statusDiv = container.querySelector('#hmis-dispense-status');
+  const logoutBtn = container.querySelector('#hmis-logout-btn');
+  
+  let selectedLocationId = null;
+  let products = [];
+  let cart = [];
+  
+  // Logout handler
+  logoutBtn.addEventListener('click', async () => {
+    await clearAuthTokens();
+    renderLoginForm(container);
+  });
+  
+  // Location selection handler
+  locationSelect.addEventListener('change', (e) => {
+    selectedLocationId = e.target.value;
+    if (selectedLocationId) {
+      productsSection.style.display = 'block';
+      loadProductsForLocation(selectedLocationId);
+    } else {
+      productsSection.style.display = 'none';
+      productsList.innerHTML = '';
+      cart = [];
+      updateCart();
+    }
+  });
+  
+  // Load products for location
+  async function loadProductsForLocation(locationId) {
+    try {
+      const storage = await new Promise((resolve) => {
+        chrome.storage.local.get(['apiEndpoint'], resolve);
+      });
+      const apiEndpoint = storage.apiEndpoint || 'http://localhost:8000';
+      const baseUrl = apiEndpoint.replace(/\/$/, '');
+      
+      loadProductsBtn.disabled = true;
+      loadProductsBtn.textContent = 'Loading...';
+      productsList.innerHTML = '<p style="text-align: center; color: #666;">Loading products...</p>';
+      
+      const response = await authenticatedFetch(`${baseUrl}/api/inventory/location/${locationId}/products`);
+      
+      if (!response.ok) {
+        throw new Error('Failed to load products');
+      }
+      
+      products = await response.json();
+      renderProductsList();
+      
+    } catch (err) {
+      productsList.innerHTML = `<p style="color: #d32f2f; text-align: center;">Error: ${err.message}</p>`;
+    } finally {
+      loadProductsBtn.disabled = false;
+      loadProductsBtn.textContent = 'Load Products';
+    }
+  }
+  
+  // Render products list
+  function renderProductsList() {
+    const searchTerm = productSearch.value.toLowerCase();
+    const filtered = products.filter(p => 
+      !searchTerm || 
+      (p.product_name || '').toLowerCase().includes(searchTerm) ||
+      (p.product_code || '').toLowerCase().includes(searchTerm)
+    );
+    
+    if (filtered.length === 0) {
+      productsList.innerHTML = '<p style="text-align: center; color: #666;">No products found</p>';
+      return;
+    }
+    
+    productsList.innerHTML = filtered.map(product => `
+      <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px; border-bottom: 1px solid #f0f0f0;">
+        <div style="flex: 1;">
+          <div style="font-weight: 500; font-size: 13px;">${product.product_name || 'Unknown Product'}</div>
+          <div style="font-size: 11px; color: #666;">Code: ${product.product_code || 'N/A'} | Available: ${product.quantity || 0}</div>
+        </div>
+        <button 
+          class="hmis-add-product-btn" 
+          data-product-id="${product.product_id}"
+          data-product-name="${product.product_name || 'Unknown'}"
+          data-available="${product.quantity || 0}"
+          style="background: #00897B; color: white; border: none; padding: 6px 12px; border-radius: 4px; font-size: 11px; cursor: pointer;"
+        >
+          Add
+        </button>
+      </div>
+    `).join('');
+    
+    // Add click handlers
+    productsList.querySelectorAll('.hmis-add-product-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const productId = parseInt(btn.dataset.productId);
+        const productName = btn.dataset.productName;
+        const available = parseFloat(btn.dataset.available) || 0;
+        
+        // Check if already in cart
+        const existing = cart.find(item => item.product_id === productId);
+        if (existing) {
+          existing.quantity += 1;
+        } else {
+          cart.push({
+            product_id: productId,
+            product_name: productName,
+            quantity: 1,
+            available: available
+          });
+        }
+        
+        updateCart();
+      });
+    });
+  }
+  
+  // Product search handler
+  productSearch.addEventListener('input', () => {
+    if (products.length > 0) {
+      renderProductsList();
+    }
+  });
+  
+  // Update cart display
+  function updateCart() {
+    if (cart.length === 0) {
+      cartItems.innerHTML = '<p style="color: #999; text-align: center; margin: 0;">No items added yet</p>';
+      submitBtn.disabled = true;
+      submitBtn.style.opacity = '0.5';
+    } else {
+      cartItems.innerHTML = cart.map((item, index) => `
+        <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px; border-bottom: 1px solid #f0f0f0;">
+          <div style="flex: 1;">
+            <div style="font-weight: 500; font-size: 13px;">${item.product_name}</div>
+            <div style="font-size: 11px; color: ${item.quantity > item.available ? '#d32f2f' : '#666'};">
+              Quantity: ${item.quantity} | Available: ${item.available}
+              ${item.quantity > item.available ? ' ⚠️ Insufficient stock' : ''}
+            </div>
+          </div>
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <input 
+              type="number" 
+              min="0.01" 
+              step="0.01"
+              value="${item.quantity}"
+              data-index="${index}"
+              class="hmis-cart-quantity"
+              style="width: 60px; padding: 4px; border: 1px solid #ddd; border-radius: 4px; font-size: 12px;"
+            />
+            <button 
+              class="hmis-remove-product-btn" 
+              data-index="${index}"
+              style="background: #f44336; color: white; border: none; padding: 4px 8px; border-radius: 4px; font-size: 11px; cursor: pointer;"
+            >
+              Remove
+            </button>
+          </div>
+        </div>
+      `).join('');
+      
+      // Add handlers for quantity changes and removals
+      cartItems.querySelectorAll('.hmis-cart-quantity').forEach(input => {
+        input.addEventListener('change', (e) => {
+          const index = parseInt(e.target.dataset.index);
+          const newQty = parseFloat(e.target.value) || 0;
+          if (newQty > 0) {
+            cart[index].quantity = newQty;
+          } else {
+            cart.splice(index, 1);
+          }
+          updateCart();
+        });
+      });
+      
+      cartItems.querySelectorAll('.hmis-remove-product-btn').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          const index = parseInt(e.target.dataset.index);
+          cart.splice(index, 1);
+          updateCart();
+        });
+      });
+      
+      submitBtn.disabled = false;
+      submitBtn.style.opacity = '1';
+    }
+  }
+  
+  // Submit dispensation
+  submitBtn.addEventListener('click', async () => {
+    if (cart.length === 0 || !selectedLocationId) {
+      return;
+    }
+    
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Submitting...';
+    statusDiv.style.display = 'none';
+    
+    try {
+      const storage = await new Promise((resolve) => {
+        chrome.storage.local.get(['apiEndpoint'], resolve);
+      });
+      const apiEndpoint = storage.apiEndpoint || 'http://localhost:8000';
+      const baseUrl = apiEndpoint.replace(/\/$/, '');
+      
+      const payload = {
+        clinic_id: clinicId,
+        location_id: parseInt(selectedLocationId),
+        visit_id: visitId,
+        patient_uuid: currentUuid,
+        items: cart.map(item => ({
+          product_id: item.product_id,
+          quantity: item.quantity.toString(),
+          notes: item.notes || ''
+        })),
+        notes: dispenseNotes.value.trim() || 'Dispensed via helper'
+      };
+      
+      const response = await authenticatedFetch(`${baseUrl}/api/inventory/product-dispensation/from-helper/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      
+      if (response.status === 201) {
+        const data = await response.json();
+        statusDiv.style.display = 'block';
+        statusDiv.style.background = '#e8f5e9';
+        statusDiv.style.color = '#2e7d32';
+        statusDiv.style.padding = '12px';
+        statusDiv.style.borderRadius = '4px';
+        statusDiv.innerHTML = `
+          ✅ Dispensation successful!<br>
+          Sales Order ID: ${data.sales_order_id || 'N/A'}<br>
+          <small>Items have been dispensed and sales order created/updated.</small>
+        `;
+        
+        // Clear cart
+        cart = [];
+        updateCart();
+        dispenseNotes.value = '';
+        
+      } else if (response.status === 400) {
+        const errorData = await response.json();
+        statusDiv.style.display = 'block';
+        statusDiv.style.background = '#ffebee';
+        statusDiv.style.color = '#d32f2f';
+        statusDiv.style.padding = '12px';
+        statusDiv.style.borderRadius = '4px';
+        
+        let errorMsg = 'Insufficient stock for some items:<br><ul style="margin: 8px 0; padding-left: 20px;">';
+        if (errorData.items) {
+          errorData.items.forEach(item => {
+            errorMsg += `<li>${item.product_name || `Product ${item.product_id}`}: Requested ${item.requested}, Available ${item.available}</li>`;
+          });
+        }
+        errorMsg += '</ul>';
+        statusDiv.innerHTML = errorMsg;
+        
+      } else {
+        throw new Error(`Server error: ${response.status}`);
+      }
+      
+    } catch (err) {
+      statusDiv.style.display = 'block';
+      statusDiv.style.background = '#ffebee';
+      statusDiv.style.color = '#d32f2f';
+      statusDiv.style.padding = '12px';
+      statusDiv.style.borderRadius = '4px';
+      statusDiv.innerHTML = `❌ Error: ${err.message}`;
+    } finally {
+      submitBtn.disabled = false;
+      submitBtn.textContent = 'Submit Dispensation';
+    }
+  });
+}
+
 // ==========================================
 // PART 2: INVENTORY MONITOR INJECTION
 // ==========================================
@@ -886,6 +1562,11 @@ window.addEventListener('message', function(event) {
 // ==========================================
 // INITIALIZATION
 // ==========================================
+
+// Initialize auth tokens on load
+loadAuthTokens().then(() => {
+  console.log("Auth tokens loaded");
+});
 
 // Start patient extraction (this will trigger visit data fetch and inventory injection)
 extractPatient();
