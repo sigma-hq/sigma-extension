@@ -213,8 +213,8 @@ async function showOverlay(uuid, displayId) {
   overlay.style.borderRadius = '10px';
   overlay.style.boxShadow = '0 4px 12px rgba(0,0,0,0.15)';
   overlay.style.fontFamily = 'system-ui, sans-serif';
-  overlay.style.minWidth = '420px';
-  overlay.style.maxWidth = '500px';
+  overlay.style.minWidth = '650px';
+  overlay.style.maxWidth = '800px';
   overlay.style.transition = 'all 0.3s ease';
   overlay.style.margin = '0 20px 20px 0';
 
@@ -1050,51 +1050,35 @@ async function renderOrderingInterface(container) {
     `;
     return;
   }
-  
-  // Load locations
-  let locations = [];
-  let selectedLocationId = null;
-  let products = [];
-  let cartItems = [];
-  
-  try {
-      const baseUrl = await getApiEndpoint();
-      const url = `${baseUrl}/api/locations/?clinic=${clinicId}`;
-      
-      console.log('[API] Calling endpoint: GET', url);
-      console.log('[Ordering] Loading locations for clinic:', clinicId, 'from:', baseUrl);
-      const locationsResponse = await authenticatedFetch(url);
-      if (locationsResponse.ok) {
-        locations = await locationsResponse.json();
-        console.log('[Ordering] Locations loaded:', locations);
-      } else {
-        console.error('[Ordering] Failed to load locations. Status:', locationsResponse.status);
-      }
-  } catch (err) {
-    console.error('[Ordering] Error loading locations:', err);
-  }
-  
-  // Render the interface
+
+  // Payment / pricelist context
+  const modeOfPayment = currentVisitData.mode_of_payment || currentVisitData.visit?.mode_of_payment;
+  const insuranceName =
+    currentVisitData.insurance_scheme_details?.scheme_name ||
+    currentVisitData.insurance?.scheme_name ||
+    null;
+  const pricelistName =
+    currentVisitData.pricelist?.name ||
+    (modeOfPayment === 'insurance' ? insuranceName : null) ||
+    'Standard Pricelist';
+
+  // Render the interface (no location selection for now)
   container.innerHTML = `
     <div style="padding: 0;">
-      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
         <h3 style="margin: 0; font-size: 14px; color: #00897B;">Ordering & Billing</h3>
         <button id="hmis-logout-btn" style="background: #f44336; color: white; border: none; padding: 6px 12px; border-radius: 4px; font-size: 11px; cursor: pointer;">
           Logout
         </button>
       </div>
-      
-      <div style="margin-bottom: 16px;">
-        <label style="display: block; margin-bottom: 8px; font-weight: 500; color: #333; font-size: 13px;">
-          Select Location (Pharmacy/Dispensing)
-        </label>
-        <select id="hmis-location-select" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px; box-sizing: border-box;">
-          <option value="">-- Select Location --</option>
-          ${locations.map(loc => `<option value="${loc.id}">${loc.name || loc.code || `Location ${loc.id}`}</option>`).join('')}
-        </select>
+
+      <div style="margin-bottom: 16px; font-size: 12px; color: #555;">
+        <div><strong>Payment Mode:</strong> ${modeOfPayment || 'cash'}</div>
+        <div><strong>Price List:</strong> ${pricelistName}</div>
+        ${insuranceName ? `<div><strong>Insurance Scheme:</strong> ${insuranceName}</div>` : ''}
       </div>
       
-      <div id="hmis-products-section" style="display: none; margin-bottom: 16px;">
+      <div id="hmis-products-section" style="margin-bottom: 16px;">
         <label style="display: block; margin-bottom: 8px; font-weight: 500; color: #333; font-size: 13px;">
           Search Products
         </label>
@@ -1153,7 +1137,6 @@ async function renderOrderingInterface(container) {
 }
 
 function setupOrderingHandlers(container, clinicId, visitId, locations) {
-  const locationSelect = container.querySelector('#hmis-location-select');
   const productsSection = container.querySelector('#hmis-products-section');
   const loadProductsBtn = container.querySelector('#hmis-load-products-btn');
   const productSearch = container.querySelector('#hmis-product-search');
@@ -1164,7 +1147,7 @@ function setupOrderingHandlers(container, clinicId, visitId, locations) {
   const statusDiv = container.querySelector('#hmis-dispense-status');
   const logoutBtn = container.querySelector('#hmis-logout-btn');
   
-  let selectedLocationId = null;
+  let selectedLocationId = null; // optional, kept for future stock-deduction support
   let products = [];
   let cart = [];
   
@@ -1174,27 +1157,13 @@ function setupOrderingHandlers(container, clinicId, visitId, locations) {
     renderLoginForm(container);
   });
   
-  // Location selection handler
-  locationSelect.addEventListener('change', (e) => {
-    selectedLocationId = e.target.value;
-    if (selectedLocationId) {
-      productsSection.style.display = 'block';
-      loadProductsForLocation(selectedLocationId);
-    } else {
-      productsSection.style.display = 'none';
-      productsList.innerHTML = '';
-      cart = [];
-      updateCart();
-    }
-  });
-  
-  // Load products for location
-  async function loadProductsForLocation(locationId) {
+  // Load all products from Odoo catalog
+  async function loadAllProducts() {
     try {
-      console.log('[Ordering] Loading products for location:', locationId);
+      console.log('[Ordering] Loading all products from Odoo catalog');
       
       const baseUrl = await getApiEndpoint();
-      const url = `${baseUrl}/api/inventory/location/${locationId}/products/`;
+      const url = `${baseUrl}/api/odoo/products/?get_all=true`;
       
       console.log('[API] Calling endpoint: GET', url);
       console.log('[Ordering] API Endpoint:', baseUrl);
@@ -1237,24 +1206,37 @@ function setupOrderingHandlers(container, clinicId, visitId, locations) {
       console.log('[Ordering] Data type:', typeof data);
       console.log('[Ordering] Is array:', Array.isArray(data));
       
-      // Handle response format: API returns { location: {...}, products: [...], total_products: N }
+      // Handle response format: Odoo products endpoint returns { status, data: [...] }
       if (Array.isArray(data)) {
         products = data;
-      } else if (data.products && Array.isArray(data.products)) {
-        // Response is wrapped in an object with 'products' key
-        products = data.products;
-        console.log('[Ordering] Extracted products from data.products:', products.length);
+      } else if (data.data && Array.isArray(data.data)) {
+        products = data.data;
+        console.log('[Ordering] Loaded products from data.data:', products.length);
       } else if (data.results && Array.isArray(data.results)) {
         // Paginated response
         products = data.results;
+        console.log('[Ordering] Loaded products from paginated response:', products.length);
       } else {
         console.warn('[Ordering] Unexpected response format:', data);
         products = [];
       }
       
+      // Map Odoo products to expected format
+      products = products.map(p => ({
+        ...p,
+        // Use id as product_id for dispensation (Odoo product ID)
+        product_id: p.id,
+        // Map Odoo fields to expected format
+        product_name: p.name || p.product_name,
+        product_code: p.default_code || p.product_code || p.code,
+        list_price: p.list_price || 0,
+        odoo_id: p.id
+      }));
+      
       console.log('[Ordering] Products array length:', products.length);
       if (products.length > 0) {
         console.log('[Ordering] First product:', products[0]);
+        console.log('[Ordering] Product odoo_id:', products[0].odoo_id, 'product_id:', products[0].product_id);
       }
       
       renderProductsList();
@@ -1300,6 +1282,14 @@ function setupOrderingHandlers(container, clinicId, visitId, locations) {
     }
   }
   
+  // Load products button handler
+  loadProductsBtn.addEventListener('click', () => {
+    loadAllProducts();
+  });
+  
+  // Auto-load products when ordering tab is opened
+  loadAllProducts();
+  
   // Render products list
   function renderProductsList() {
     const searchTerm = productSearch.value.toLowerCase();
@@ -1311,10 +1301,10 @@ function setupOrderingHandlers(container, clinicId, visitId, locations) {
       if (cartProductIds.has(p.product_id)) {
         return false;
       }
-      // Apply search filter
+      // Apply search filter (handle Odoo and mapped fields)
       if (!searchTerm) return true;
-      const nameMatch = (p.product_name || '').toLowerCase().includes(searchTerm);
-      const codeMatch = (p.product_code || '').toLowerCase().includes(searchTerm);
+      const nameMatch = (p.product_name || p.name || '').toLowerCase().includes(searchTerm);
+      const codeMatch = (p.product_code || p.default_code || p.code || '').toLowerCase().includes(searchTerm);
       return nameMatch || codeMatch;
     });
     
@@ -1325,15 +1315,19 @@ function setupOrderingHandlers(container, clinicId, visitId, locations) {
     
     productsList.innerHTML = filtered.map(product => `
       <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px; border-bottom: 1px solid #f0f0f0;">
-        <div style="flex: 1;">
-          <div style="font-weight: 500; font-size: 13px;">${product.product_name || 'Unknown Product'}</div>
-          <div style="font-size: 11px; color: #666;">Code: ${product.product_code || 'N/A'} | Available: ${product.quantity || 0}</div>
+        <div style="flex: 1; min-width: 0;">
+          <div style="font-weight: 500; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 320px;">
+            ${product.product_name || product.name || 'Unknown Product'}
+          </div>
+          <div style="font-size: 11px; color: #666;">
+            Code: ${product.product_code || product.default_code || product.code || 'N/A'}
+            ${product.list_price ? ` | Price: ${product.list_price}` : ''}
+          </div>
         </div>
         <button 
           class="hmis-add-product-btn" 
-          data-product-id="${product.product_id}"
-          data-product-name="${product.product_name || 'Unknown'}"
-          data-available="${product.quantity || 0}"
+          data-product-id="${product.product_id || product.odoo_id || product.id}"
+          data-product-name="${product.product_name || product.name || 'Unknown'}"
           style="background: #00897B; color: white; border: none; padding: 6px 12px; border-radius: 4px; font-size: 11px; cursor: pointer;"
         >
           Add
@@ -1344,9 +1338,16 @@ function setupOrderingHandlers(container, clinicId, visitId, locations) {
     // Add click handlers
     productsList.querySelectorAll('.hmis-add-product-btn').forEach(btn => {
       btn.addEventListener('click', () => {
-        const productId = parseInt(btn.dataset.productId);
+        const productId = parseInt(btn.dataset.productId); // This is Odoo product ID
         const productName = btn.dataset.productName;
-        const available = parseFloat(btn.dataset.available) || 0;
+
+        // Find full product to get price
+        const product = products.find(
+          p => p.product_id === productId || p.id === productId || p.odoo_id === productId
+        );
+        const unitPrice = product && typeof product.list_price !== 'undefined'
+          ? parseFloat(product.list_price) || 0
+          : 0;
         
         // Check if already in cart
         const existing = cart.find(item => item.product_id === productId);
@@ -1354,10 +1355,10 @@ function setupOrderingHandlers(container, clinicId, visitId, locations) {
           existing.quantity += 1;
         } else {
           cart.push({
-            product_id: productId,
+            product_id: productId, // Store Odoo product ID for dispensation
             product_name: productName,
-            quantity: 1,
-            available: available
+            unit_price: unitPrice,
+            quantity: 1
           });
         }
         
@@ -1381,35 +1382,64 @@ function setupOrderingHandlers(container, clinicId, visitId, locations) {
       submitBtn.disabled = true;
       submitBtn.style.opacity = '0.5';
     } else {
-      cartItems.innerHTML = cart.map((item, index) => `
-        <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px; border-bottom: 1px solid #f0f0f0;">
-          <div style="flex: 1;">
-            <div style="font-weight: 500; font-size: 13px;">${item.product_name}</div>
-            <div style="font-size: 11px; color: ${item.quantity > item.available ? '#d32f2f' : '#666'};">
-              Quantity: ${item.quantity} | Available: ${item.available}
-              ${item.quantity > item.available ? ' ⚠️ Insufficient stock' : ''}
+      const cartTotal = cart.reduce(
+        (sum, item) => sum + (item.unit_price || 0) * (parseFloat(item.quantity) || 0),
+        0
+      );
+
+      const rowsHtml = cart.map((item, index) => {
+        const lineTotal = (item.unit_price || 0) * (parseFloat(item.quantity) || 0);
+        return `
+          <div style="display: flex; align-items: center; padding: 6px 8px; border-bottom: 1px solid #f0f0f0;">
+            <div style="flex: 2; min-width: 0;">
+              <div style="font-weight: 500; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 320px;">
+                ${item.product_name}
+              </div>
+            </div>
+            <div style="flex: 0.9; font-size: 12px; text-align: right; padding: 0 4px;">
+              ${formatCurrency(item.unit_price || 0)}
+            </div>
+            <div style="flex: 0.9; text-align: right; padding: 0 4px;">
+              <input 
+                type="number" 
+                min="0.01" 
+                step="0.01"
+                value="${item.quantity}"
+                data-index="${index}"
+                class="hmis-cart-quantity"
+                style="width: 70px; padding: 4px; border: 1px solid #ddd; border-radius: 4px; font-size: 12px; text-align: right;"
+              />
+            </div>
+            <div style="flex: 1.1; font-size: 12px; text-align: right; padding: 0 4px;">
+              ${formatCurrency(lineTotal)}
+            </div>
+            <div style="width: 70px; text-align: right; padding-left: 4px;">
+              <button 
+                class="hmis-remove-product-btn" 
+                data-index="${index}"
+                style="background: #f44336; color: white; border: none; padding: 4px 8px; border-radius: 4px; font-size: 11px; cursor: pointer;"
+              >
+                Remove
+              </button>
             </div>
           </div>
-          <div style="display: flex; align-items: center; gap: 8px;">
-            <input 
-              type="number" 
-              min="0.01" 
-              step="0.01"
-              value="${item.quantity}"
-              data-index="${index}"
-              class="hmis-cart-quantity"
-              style="width: 60px; padding: 4px; border: 1px solid #ddd; border-radius: 4px; font-size: 12px;"
-            />
-            <button 
-              class="hmis-remove-product-btn" 
-              data-index="${index}"
-              style="background: #f44336; color: white; border: none; padding: 4px 8px; border-radius: 4px; font-size: 11px; cursor: pointer;"
-            >
-              Remove
-            </button>
-          </div>
+        `;
+      }).join('');
+
+      cartItems.innerHTML = `
+        <div style="display: flex; font-size: 11px; font-weight: 600; padding: 4px 8px; border-bottom: 1px solid #e0e0e0; background: #fafafa;">
+          <div style="flex: 2;">Item</div>
+          <div style="flex: 0.9; text-align: right; padding: 0 4px;">Unit</div>
+          <div style="flex: 0.9; text-align: right; padding: 0 4px;">Qty</div>
+          <div style="flex: 1.1; text-align: right; padding: 0 4px;">Total</div>
+          <div style="width: 70px;"></div>
         </div>
-      `).join('');
+        ${rowsHtml}
+        <div style="display: flex; justify-content: flex-end; padding: 8px 8px 4px 8px; border-top: 1px solid #e0e0e0; margin-top: 4px; font-size: 13px; font-weight: 600;">
+          <span style="margin-right: 8px;">Total:</span>
+          <span>${formatCurrency(cartTotal)}</span>
+        </div>
+      `;
       
       // Add handlers for quantity changes and removals
       cartItems.querySelectorAll('.hmis-cart-quantity').forEach(input => {
@@ -1442,7 +1472,7 @@ function setupOrderingHandlers(container, clinicId, visitId, locations) {
   
   // Submit dispensation
   submitBtn.addEventListener('click', async () => {
-    if (cart.length === 0 || !selectedLocationId) {
+    if (cart.length === 0) {
       return;
     }
     
@@ -1461,15 +1491,15 @@ function setupOrderingHandlers(container, clinicId, visitId, locations) {
       console.log('[Ordering] Submitting dispensation to:', baseUrl);
       const payload = {
         clinic_id: clinicId,
-        location_id: parseInt(selectedLocationId),
         visit_id: visitId,
         patient_uuid: currentUuid,
         items: cart.map(item => ({
-          product_id: item.product_id,
-          quantity: item.quantity.toString(),
-          notes: item.notes || ''
+          product_id: item.product_id, // This is odoo_id
+          quantity: item.quantity.toString()
         })),
-        notes: dispenseNotes.value.trim() || 'Dispensed via helper'
+        notes: dispenseNotes.value.trim() || 'Dispensed via helper',
+        sales_order_id: null,
+        location_id: selectedLocationId ? parseInt(selectedLocationId) : null
       };
       
       const response = await authenticatedFetch(url, {
@@ -1495,6 +1525,9 @@ function setupOrderingHandlers(container, clinicId, visitId, locations) {
         cart = [];
         updateCart();
         dispenseNotes.value = '';
+        
+        // Reload products to refresh catalog
+        await loadAllProducts();
         
       } else if (response.status === 400) {
         const errorData = await response.json();
