@@ -1098,7 +1098,7 @@ async function renderOrderingInterface(container) {
         </div>
         
         <div id="hmis-products-list" style="margin-top: 12px; max-height: 200px; overflow-y: auto; border: 1px solid #e0e0e0; border-radius: 4px; padding: 8px;">
-          <!-- Products will be loaded here -->
+          <p style="text-align: center; color: #666;">Click "Load Products" or products will auto-load...</p>
         </div>
       </div>
       
@@ -1133,10 +1133,10 @@ async function renderOrderingInterface(container) {
   `;
   
   // Setup event handlers
-  setupOrderingHandlers(container, clinicId, visitId, locations);
+  setupOrderingHandlers(container, clinicId, visitId);
 }
 
-function setupOrderingHandlers(container, clinicId, visitId, locations) {
+function setupOrderingHandlers(container, clinicId, visitId) {
   const productsSection = container.querySelector('#hmis-products-section');
   const loadProductsBtn = container.querySelector('#hmis-load-products-btn');
   const productSearch = container.querySelector('#hmis-product-search');
@@ -1151,16 +1151,29 @@ function setupOrderingHandlers(container, clinicId, visitId, locations) {
   let products = [];
   let cart = [];
   
-  // Logout handler
+  // Logout handler - FIXED
   logoutBtn.addEventListener('click', async () => {
+    console.log('[Ordering] Logout button clicked');
     await clearAuthTokens();
-    renderLoginForm(container);
+    console.log('[Ordering] Auth tokens cleared');
+    // Re-render the ordering tab to show login form
+    renderOrderingTab();
   });
   
-  // Load all products from Odoo catalog
+  // Load all products from Odoo catalog - FIXED
   async function loadAllProducts() {
     try {
       console.log('[Ordering] Loading all products from Odoo catalog');
+      
+      // Check authentication first
+      const authenticated = await isAuthenticated();
+      console.log('[Ordering] Authentication status:', authenticated);
+      
+      if (!authenticated) {
+        console.warn('[Ordering] Not authenticated - switching to login form');
+        renderLoginForm(container);
+        return;
+      }
       
       const baseUrl = await getApiEndpoint();
       const url = `${baseUrl}/api/odoo/products/?get_all=true`;
@@ -1205,20 +1218,38 @@ function setupOrderingHandlers(container, clinicId, visitId, locations) {
       console.log('[Ordering] Products loaded successfully:', data);
       console.log('[Ordering] Data type:', typeof data);
       console.log('[Ordering] Is array:', Array.isArray(data));
+      console.log('[Ordering] Data keys:', data ? Object.keys(data) : 'null');
       
-      // Handle response format: Odoo products endpoint returns { status, data: [...] }
+      // Handle response format: Odoo products endpoint returns { status: 'success', data: [...] }
+      let productsArray = null;
+      
       if (Array.isArray(data)) {
-        products = data;
-      } else if (data.data && Array.isArray(data.data)) {
-        products = data.data;
-        console.log('[Ordering] Loaded products from data.data:', products.length);
-      } else if (data.results && Array.isArray(data.results)) {
-        // Paginated response
-        products = data.results;
-        console.log('[Ordering] Loaded products from paginated response:', products.length);
-      } else {
-        console.warn('[Ordering] Unexpected response format:', data);
+        productsArray = data;
+        console.log('[Ordering] Direct array response, products count:', productsArray.length);
+      } else if (data && typeof data === 'object') {
+        // Check for nested data structure
+        if (data.data && Array.isArray(data.data)) {
+          // Response wrapped in { status, data: [...] }
+          productsArray = data.data;
+          console.log('[Ordering] Loaded products from data.data:', productsArray.length);
+        } else if (data.results && Array.isArray(data.results)) {
+          // Paginated response
+          productsArray = data.results;
+          console.log('[Ordering] Loaded products from paginated response:', productsArray.length);
+        } else {
+          console.warn('[Ordering] Unexpected response format - no array found in data:', data);
+          console.warn('[Ordering] Response keys:', Object.keys(data));
+          if (data.data) {
+            console.warn('[Ordering] data.data type:', typeof data.data, 'isArray:', Array.isArray(data.data));
+          }
+        }
+      }
+      
+      if (!productsArray) {
+        console.error('[Ordering] Could not extract products array from response');
         products = [];
+      } else {
+        products = productsArray;
       }
       
       // Map Odoo products to expected format
@@ -1283,12 +1314,19 @@ function setupOrderingHandlers(container, clinicId, visitId, locations) {
   }
   
   // Load products button handler
-  loadProductsBtn.addEventListener('click', () => {
-    loadAllProducts();
-  });
+  if (loadProductsBtn) {
+    loadProductsBtn.addEventListener('click', () => {
+      loadAllProducts();
+    });
+  } else {
+    console.error('[Ordering] Load products button not found!');
+  }
   
-  // Auto-load products when ordering tab is opened
-  loadAllProducts();
+  // Auto-load products when ordering tab is opened - FIXED
+  console.log('[Ordering] Auto-loading products on tab open...');
+  setTimeout(() => {
+    loadAllProducts();
+  }, 100);
   
   // Render products list
   function renderProductsList() {
