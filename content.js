@@ -53,13 +53,11 @@ async function isAuthenticated() {
   
   // Verify token is still valid
   try {
-    const storage = await new Promise((resolve) => {
-      chrome.storage.local.get(['apiEndpoint'], resolve);
-    });
-    const apiEndpoint = storage.apiEndpoint || 'http://localhost:8000';
-    const baseUrl = apiEndpoint.replace(/\/$/, '');
+    const baseUrl = await getApiEndpoint();
+    const url = `${baseUrl}/api/token/verify/`;
     
-    const response = await fetch(`${baseUrl}/api/token/verify/`, {
+    console.log('[API] Calling endpoint: POST', url);
+    const response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ token: authTokens.access })
@@ -77,13 +75,11 @@ async function refreshAccessToken() {
     throw new Error('No refresh token available');
   }
   
-  const storage = await new Promise((resolve) => {
-    chrome.storage.local.get(['apiEndpoint'], resolve);
-  });
-  const apiEndpoint = storage.apiEndpoint || 'http://localhost:8000';
-  const baseUrl = apiEndpoint.replace(/\/$/, '');
+  const baseUrl = await getApiEndpoint();
+  const url = `${baseUrl}/api/token/refresh/`;
   
-  const response = await fetch(`${baseUrl}/api/token/refresh/`, {
+  console.log('[API] Calling endpoint: POST', url);
+  const response = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ refresh: authTokens.refresh })
@@ -97,6 +93,16 @@ async function refreshAccessToken() {
   const data = await response.json();
   await saveAuthTokens(data.access, data.refresh || authTokens.refresh);
   return data.access;
+}
+
+// Get API endpoint from storage
+async function getApiEndpoint() {
+  const storage = await new Promise((resolve) => {
+    chrome.storage.local.get(['apiEndpoint'], resolve);
+  });
+  const endpoint = storage.apiEndpoint || 'http://localhost:8000';
+  // Remove trailing slash if present, we'll add it per endpoint as needed
+  return endpoint.replace(/\/$/, '');
 }
 
 // Get authenticated fetch headers
@@ -115,29 +121,54 @@ async function getAuthHeaders() {
 
 // Authenticated fetch with auto-refresh
 async function authenticatedFetch(url, options = {}) {
+  console.log('[Auth] authenticatedFetch called for URL:', url);
+  console.log('[Auth] Options:', JSON.stringify(options, null, 2));
+  
   await loadAuthTokens();
+  console.log('[Auth] Tokens loaded - Access:', !!authTokens.access, 'Refresh:', !!authTokens.refresh);
   
   // Add auth header
   const headers = await getAuthHeaders();
+  console.log('[Auth] Headers to send:', Object.keys(headers));
   options.headers = { ...headers, ...options.headers };
   
-  let response = await fetch(url, options);
+  console.log('[Auth] Final request options:', {
+    method: options.method || 'GET',
+    headers: Object.keys(options.headers),
+    hasBody: !!options.body
+  });
   
-  // If 401, try to refresh token
-  if (response.status === 401 && authTokens.refresh) {
-    try {
-      const newAccess = await refreshAccessToken();
-      // Retry with new token
-      options.headers['Authorization'] = `Bearer ${newAccess}`;
-      response = await fetch(url, options);
-    } catch (err) {
-      // Refresh failed, clear tokens
-      await clearAuthTokens();
-      throw new Error('Authentication expired. Please login again.');
+  try {
+    console.log('[Auth] Making fetch request...');
+    let response = await fetch(url, options);
+    console.log('[Auth] Fetch completed - Status:', response.status, 'OK:', response.ok);
+    
+    // If 401, try to refresh token
+    if (response.status === 401 && authTokens.refresh) {
+      console.log('[Auth] Got 401, attempting token refresh...');
+      try {
+        const newAccess = await refreshAccessToken();
+        console.log('[Auth] Token refreshed successfully');
+        // Retry with new token
+        options.headers['Authorization'] = `Bearer ${newAccess}`;
+        console.log('[Auth] Retrying request with new token...');
+        response = await fetch(url, options);
+        console.log('[Auth] Retry completed - Status:', response.status, 'OK:', response.ok);
+      } catch (err) {
+        console.error('[Auth] Token refresh failed:', err);
+        await clearAuthTokens();
+        throw new Error('Authentication expired. Please login again.');
+      }
     }
+    
+    return response;
+  } catch (err) {
+    console.error('[Auth] Fetch error:', err);
+    console.error('[Auth] Error name:', err.name);
+    console.error('[Auth] Error message:', err.message);
+    console.error('[Auth] Error stack:', err.stack);
+    throw err;
   }
-  
-  return response;
 }
 
 // ==========================================
@@ -274,16 +305,11 @@ async function showOverlay(uuid, displayId) {
   });
 
   try {
-    // Get API endpoint from storage (default to localhost if not set)
-    const storage = await new Promise((resolve) => {
-      chrome.storage.local.get(['apiEndpoint'], resolve);
-    });
-    const apiEndpoint = storage.apiEndpoint || 'http://localhost:8000';
-    
-    // Remove trailing slash if present
-    const baseUrl = apiEndpoint.replace(/\/$/, '');
+    // Get API endpoint from storage - use exactly as configured
+    const baseUrl = await getApiEndpoint();
     const url = `${baseUrl}/api/visits/summary/by-patient-uuid/${uuid}/`;
     
+    console.log('[API] Calling endpoint: GET', url);
     console.log("Fetching visit summary from:", url);
     
     // Try authenticated fetch if token available, otherwise regular fetch
@@ -794,6 +820,8 @@ function renderSettingsTab() {
         const baseUrl = endpoint.replace(/\/$/, '');
         const testUrl = `${baseUrl}/api/visits/summary/by-patient-uuid/test/`;
         
+        console.log('[API] Calling endpoint: GET', testUrl);
+        console.log('[Settings] Testing connection to:', testUrl);
         const response = await fetch(testUrl, {
           method: 'GET',
           headers: {
@@ -968,13 +996,11 @@ function renderLoginForm(container) {
     }
     
     try {
-      const storage = await new Promise((resolve) => {
-        chrome.storage.local.get(['apiEndpoint'], resolve);
-      });
-      const apiEndpoint = storage.apiEndpoint || 'http://localhost:8000';
-      const baseUrl = apiEndpoint.replace(/\/$/, '');
+      const baseUrl = await getApiEndpoint();
+      const url = `${baseUrl}/api/token/`;
       
-      const response = await fetch(`${baseUrl}/api/token/`, {
+      console.log('[API] Calling endpoint: POST', url);
+      const response = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, password })
@@ -1032,18 +1058,20 @@ async function renderOrderingInterface(container) {
   let cartItems = [];
   
   try {
-    const storage = await new Promise((resolve) => {
-      chrome.storage.local.get(['apiEndpoint'], resolve);
-    });
-    const apiEndpoint = storage.apiEndpoint || 'http://localhost:8000';
-    const baseUrl = apiEndpoint.replace(/\/$/, '');
-    
-    const locationsResponse = await authenticatedFetch(`${baseUrl}/api/locations/?clinic=${clinicId}`);
-    if (locationsResponse.ok) {
-      locations = await locationsResponse.json();
-    }
+      const baseUrl = await getApiEndpoint();
+      const url = `${baseUrl}/api/locations/?clinic=${clinicId}`;
+      
+      console.log('[API] Calling endpoint: GET', url);
+      console.log('[Ordering] Loading locations for clinic:', clinicId, 'from:', baseUrl);
+      const locationsResponse = await authenticatedFetch(url);
+      if (locationsResponse.ok) {
+        locations = await locationsResponse.json();
+        console.log('[Ordering] Locations loaded:', locations);
+      } else {
+        console.error('[Ordering] Failed to load locations. Status:', locationsResponse.status);
+      }
   } catch (err) {
-    console.error('Error loading locations:', err);
+    console.error('[Ordering] Error loading locations:', err);
   }
   
   // Render the interface
@@ -1163,27 +1191,89 @@ function setupOrderingHandlers(container, clinicId, visitId, locations) {
   // Load products for location
   async function loadProductsForLocation(locationId) {
     try {
-      const storage = await new Promise((resolve) => {
-        chrome.storage.local.get(['apiEndpoint'], resolve);
-      });
-      const apiEndpoint = storage.apiEndpoint || 'http://localhost:8000';
-      const baseUrl = apiEndpoint.replace(/\/$/, '');
+      console.log('[Ordering] Loading products for location:', locationId);
+      
+      const baseUrl = await getApiEndpoint();
+      const url = `${baseUrl}/api/inventory/location/${locationId}/products/`;
+      
+      console.log('[API] Calling endpoint: GET', url);
+      console.log('[Ordering] API Endpoint:', baseUrl);
+      console.log('[Ordering] Full URL:', url);
+      
+      // Check authentication
+      await loadAuthTokens();
+      console.log('[Ordering] Auth token available:', !!authTokens.access);
+      if (authTokens.access) {
+        console.log('[Ordering] Auth token (first 20 chars):', authTokens.access.substring(0, 20) + '...');
+      }
       
       loadProductsBtn.disabled = true;
       loadProductsBtn.textContent = 'Loading...';
       productsList.innerHTML = '<p style="text-align: center; color: #666;">Loading products...</p>';
       
-      const response = await authenticatedFetch(`${baseUrl}/api/inventory/location/${locationId}/products`);
+      console.log('[Ordering] Making authenticated fetch request...');
+      const response = await authenticatedFetch(url);
+      
+      console.log('[Ordering] Response status:', response.status);
+      console.log('[Ordering] Response ok:', response.ok);
+      console.log('[Ordering] Response headers:', Object.fromEntries(response.headers.entries()));
       
       if (!response.ok) {
-        throw new Error('Failed to load products');
+        const errorText = await response.text();
+        console.error('[Ordering] Response error body:', errorText);
+        let errorMessage = `Failed to load products (Status: ${response.status})`;
+        try {
+          const errorJson = JSON.parse(errorText);
+          errorMessage = errorJson.detail || errorJson.message || errorMessage;
+          console.error('[Ordering] Parsed error:', errorJson);
+        } catch (e) {
+          console.error('[Ordering] Could not parse error as JSON:', e);
+        }
+        throw new Error(errorMessage);
       }
       
-      products = await response.json();
+      const data = await response.json();
+      console.log('[Ordering] Products loaded successfully:', data);
+      console.log('[Ordering] Number of products:', Array.isArray(data) ? data.length : 'Not an array');
+      
+      products = Array.isArray(data) ? data : [];
       renderProductsList();
       
     } catch (err) {
-      productsList.innerHTML = `<p style="color: #d32f2f; text-align: center;">Error: ${err.message}</p>`;
+      console.error('[Ordering] Error loading products:', err);
+      console.error('[Ordering] Error name:', err.name);
+      console.error('[Ordering] Error message:', err.message);
+      console.error('[Ordering] Error stack:', err.stack);
+      
+      let errorMessage = err.message || 'Failed to load products';
+      
+      // Provide more specific error messages
+      if (err.message.includes('Failed to fetch')) {
+        // Check if it's an HTTPS/HTTP mismatch
+        const storage = await new Promise((resolve) => {
+          chrome.storage.local.get(['apiEndpoint'], resolve);
+        });
+        const endpoint = storage.apiEndpoint || '';
+        
+        if (endpoint.startsWith('https://') && (endpoint.includes('localhost') || endpoint.includes('127.0.0.1') || endpoint.includes('192.168.'))) {
+          errorMessage = 'HTTPS/HTTP mismatch: Django development server only supports HTTP. Please use http:// in your API endpoint settings.';
+          console.error('[Ordering] HTTPS/HTTP mismatch detected');
+        } else {
+          errorMessage = 'Network error: Could not reach the server. Check your connection and API endpoint.';
+          console.error('[Ordering] Network error - possible causes: CORS, certificate, or server unreachable');
+        }
+      } else if (err.message.includes('401')) {
+        errorMessage = 'Authentication failed. Please login again.';
+        console.error('[Ordering] Authentication error - token may be expired');
+      } else if (err.message.includes('403')) {
+        errorMessage = 'Access denied. You may not have permission to access this location.';
+        console.error('[Ordering] Permission error');
+      } else if (err.message.includes('404')) {
+        errorMessage = 'Location or endpoint not found.';
+        console.error('[Ordering] Not found error');
+      }
+      
+      productsList.innerHTML = `<p style="color: #d32f2f; text-align: center;">Error: ${errorMessage}</p>`;
     } finally {
       loadProductsBtn.disabled = false;
       loadProductsBtn.textContent = 'Load Products';
@@ -1332,9 +1422,11 @@ function setupOrderingHandlers(container, clinicId, visitId, locations) {
       const storage = await new Promise((resolve) => {
         chrome.storage.local.get(['apiEndpoint'], resolve);
       });
-      const apiEndpoint = storage.apiEndpoint || 'http://localhost:8000';
-      const baseUrl = apiEndpoint.replace(/\/$/, '');
+      const baseUrl = await getApiEndpoint();
+      const url = `${baseUrl}/api/inventory/product-dispensation/from-helper/`;
       
+      console.log('[API] Calling endpoint: POST', url);
+      console.log('[Ordering] Submitting dispensation to:', baseUrl);
       const payload = {
         clinic_id: clinicId,
         location_id: parseInt(selectedLocationId),
@@ -1348,7 +1440,7 @@ function setupOrderingHandlers(container, clinicId, visitId, locations) {
         notes: dispenseNotes.value.trim() || 'Dispensed via helper'
       };
       
-      const response = await authenticatedFetch(`${baseUrl}/api/inventory/product-dispensation/from-helper/`, {
+      const response = await authenticatedFetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
@@ -1528,11 +1620,8 @@ function injectInventoryMonitor(onInjectedCallback) {
 }
 
 async function sendClinicDataToInjectedScript(clinicData) {
-  // Get API endpoint from storage
-  const storage = await new Promise((resolve) => {
-    chrome.storage.local.get(['apiEndpoint'], resolve);
-  });
-  const apiEndpoint = storage.apiEndpoint || 'http://localhost:8000';
+  // Get API endpoint from storage - use exactly as configured
+  const apiEndpoint = await getApiEndpoint();
   
   window.postMessage({
     type: 'CLINIC_DATA',

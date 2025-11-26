@@ -170,6 +170,7 @@
         const baseUrl = apiEndpoint.replace(/\/$/, '');
         const endpoint = `${baseUrl}/api/inventory/location/by-drug-uuid/?drug_uuid=${medData.drugUuid}&clinic_id=${clinicData.clinicId}`;
         
+        console.log('[API] Calling endpoint: GET', endpoint);
         console.log("Calling inventory API:", endpoint);
         
         const response = await fetch(endpoint, {
