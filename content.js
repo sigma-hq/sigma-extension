@@ -1527,6 +1527,10 @@ function setupOrderingHandlers(container, clinicId, visitId) {
       
       console.log('[API] Calling endpoint: POST', url);
       console.log('[Ordering] Submitting dispensation to:', baseUrl);
+      // Get pricelist_id from visit data
+      const pricelistId = currentVisitData?.pricelist?.id || null;
+      console.log('[Ordering] Pricelist ID:', pricelistId);
+      
       const payload = {
         clinic_id: clinicId,
         visit_id: visitId,
@@ -1537,8 +1541,11 @@ function setupOrderingHandlers(container, clinicId, visitId) {
         })),
         notes: dispenseNotes.value.trim() || 'Dispensed via helper',
         sales_order_id: null,
-        location_id: selectedLocationId ? parseInt(selectedLocationId) : null
+        location_id: selectedLocationId ? parseInt(selectedLocationId) : null,
+        pricelist_id: pricelistId
       };
+      
+      console.log('[Ordering] Dispensation payload:', JSON.stringify(payload, null, 2));
       
       const response = await authenticatedFetch(url, {
         method: 'POST',
