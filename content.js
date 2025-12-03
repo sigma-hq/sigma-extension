@@ -453,18 +453,24 @@ async function showOverlay(uuid, displayId) {
     showTab('visit');
 
   } catch (err) {
-    let errorMessage = err.message;
+    let errorMessage = 'Unable to connect to the API server.';
     
-    if (err.message.includes('Failed to fetch') || err.message.includes('ERR_CERT_AUTHORITY_INVALID')) {
-      errorMessage = 'Certificate error or connection failed. If using HTTPS with a self-signed certificate, you may need to accept it in your browser first.';
+    if (err.message.includes('Failed to fetch')) {
+      errorMessage = 'Could not reach the API server. Please check your connection and ensure the server is running.';
     } else if (err.message.includes('CORS')) {
-      errorMessage = 'CORS error: The API server may not allow requests from this origin.';
+      errorMessage = 'The API server may not allow requests from this origin. Please check your server configuration.';
+    } else if (err.message.includes('401') || err.message.includes('403')) {
+      errorMessage = 'Authentication issue. Please check your login credentials or API permissions.';
+    } else if (err.message.includes('404')) {
+      errorMessage = 'The requested endpoint was not found. Please verify your API endpoint configuration.';
+    } else if (err.message) {
+      errorMessage = `Connection error: ${err.message}`;
     }
     
     overlay.querySelector('#hmis-content').innerHTML = `
       <div style="color:#d32f2f; padding:12px; background:#ffebee; border-radius:4px;">
-        <strong>Failed to load summary</strong><br/>
-        <small>${errorMessage}</small><br/>
+        <strong>⚠️ Unable to Load Visit Summary</strong><br/>
+        <small style="margin-top:8px; display:block;">${errorMessage}</small><br/>
         <small style="margin-top:8px; display:block;">
           <a href="#" id="configure-endpoint-link" style="color:#00897B; text-decoration:underline; cursor:pointer;">Configure API endpoint</a>
         </small>
@@ -821,15 +827,15 @@ function renderSettingsTab() {
         </div>
         
         <div style="background: #e3f2fd; border-left: 4px solid #2196F3; padding: 12px; margin-top: 16px; border-radius: 4px; font-size: 12px; color: #1565C0;">
-          <strong>ℹ️ About Certificate Errors</strong>
+          <strong>ℹ️ Troubleshooting Tips</strong>
           <p style="margin: 5px 0 0 0;">
-            If you're using HTTPS with a self-signed certificate and seeing "ERR_CERT_AUTHORITY_INVALID" errors:
+            If you're experiencing connection issues:
           </p>
           <ul style="margin: 5px 0; padding-left: 20px;">
-            <li>Click the certificate error in your browser's address bar</li>
-            <li>Select "Advanced" and then "Proceed to [site] (unsafe)"</li>
-            <li>This will allow the browser to accept the certificate for this session</li>
-            <li>For production, use a valid SSL certificate from a trusted authority</li>
+            <li>Ensure your API server is running and accessible</li>
+            <li>Verify the endpoint URL is correct (including protocol and port)</li>
+            <li>Check that your server allows requests from this origin (CORS settings)</li>
+            <li>For local development, use <code>http://localhost:8000</code> instead of HTTPS</li>
           </ul>
         </div>
       </div>
@@ -900,13 +906,18 @@ function renderSettingsTab() {
         let statusColor = '#d32f2f';
         let statusBg = '#ffebee';
         
-        if (err.message.includes('Failed to fetch') || err.message.includes('ERR_CERT_AUTHORITY_INVALID')) {
-          statusMessage = '❌ Certificate error detected. You need to accept the certificate in your browser first.';
-          statusMessage += '<br><br><strong>Solution:</strong> Open <a href="' + endpoint + '" target="_blank" style="color: #00897B; text-decoration: underline;">' + endpoint + '</a> in a new tab, accept the certificate warning, then try again.';
+        if (err.message.includes('Failed to fetch')) {
+          statusMessage = '❌ Could not reach the server. Please check that:<br>';
+          statusMessage += '<ul style="margin: 8px 0; padding-left: 20px;">';
+          statusMessage += '<li>The server is running</li>';
+          statusMessage += '<li>The URL is correct</li>';
+          statusMessage += '<li>Your network connection is active</li>';
+          statusMessage += '</ul>';
+          statusMessage += '<br>Try opening <a href="' + endpoint + '" target="_blank" style="color: #00897B; text-decoration: underline;">' + endpoint + '</a> in a new tab to verify the server is accessible.';
         } else if (err.message.includes('CORS')) {
-          statusMessage = '⚠️ CORS error: The server may not allow requests from this origin.';
+          statusMessage = '⚠️ CORS error: The server may not allow requests from this origin. Please check your server\'s CORS configuration.';
         } else if (err.message.includes('ERR_CONNECTION_REFUSED')) {
-          statusMessage = '❌ Connection refused. Check if the server is running and the URL is correct.';
+          statusMessage = '❌ Connection refused. The server may not be running, or the URL/port is incorrect.';
         } else {
           statusMessage = '❌ Connection failed: ' + err.message;
         }
@@ -1339,9 +1350,9 @@ function setupOrderingHandlers(container, clinicId, visitId) {
       console.error('[Ordering] Error message:', err.message);
       console.error('[Ordering] Error stack:', err.stack);
       
-      let errorMessage = err.message || 'Failed to load products';
+      let errorMessage = 'Unable to load products.';
       
-      // Provide more specific error messages
+      // Provide friendly, specific error messages
       if (err.message.includes('Failed to fetch')) {
         // Check if it's an HTTPS/HTTP mismatch
         const storage = await new Promise((resolve) => {
@@ -1350,24 +1361,26 @@ function setupOrderingHandlers(container, clinicId, visitId) {
         const endpoint = storage.apiEndpoint || '';
         
         if (endpoint.startsWith('https://') && (endpoint.includes('localhost') || endpoint.includes('127.0.0.1') || endpoint.includes('192.168.'))) {
-          errorMessage = 'HTTPS/HTTP mismatch: Django development server only supports HTTP. Please use http:// in your API endpoint settings.';
+          errorMessage = '⚠️ Protocol mismatch: The development server uses HTTP, not HTTPS. Please update your API endpoint to use http:// instead of https://';
           console.error('[Ordering] HTTPS/HTTP mismatch detected');
         } else {
-          errorMessage = 'Network error: Could not reach the server. Check your connection and API endpoint.';
-          console.error('[Ordering] Network error - possible causes: CORS, certificate, or server unreachable');
+          errorMessage = '⚠️ Could not reach the server. Please check your connection and verify the API endpoint is correct.';
+          console.error('[Ordering] Network error - server may be unreachable');
         }
       } else if (err.message.includes('401')) {
-        errorMessage = 'Authentication failed. Please login again.';
+        errorMessage = '🔐 Authentication required. Please login again to access products.';
         console.error('[Ordering] Authentication error - token may be expired');
       } else if (err.message.includes('403')) {
-        errorMessage = 'Access denied. You may not have permission to access this location.';
+        errorMessage = '🚫 Access denied. You may not have permission to access this resource.';
         console.error('[Ordering] Permission error');
       } else if (err.message.includes('404')) {
-        errorMessage = 'Location or endpoint not found.';
+        errorMessage = '❓ Endpoint not found. Please verify your API endpoint configuration.';
         console.error('[Ordering] Not found error');
+      } else if (err.message) {
+        errorMessage = `⚠️ ${err.message}`;
       }
       
-      productsList.innerHTML = `<p style="color: #d32f2f; text-align: center;">Error: ${errorMessage}</p>`;
+      productsList.innerHTML = `<div style="color: #d32f2f; text-align: center; padding: 12px; background: #ffebee; border-radius: 4px;">${errorMessage}</div>`;
     } finally {
       loadProductsBtn.disabled = false;
       loadProductsBtn.textContent = 'Load Products';
@@ -1695,7 +1708,17 @@ function setupOrderingHandlers(container, clinicId, visitId) {
       statusDiv.style.color = '#d32f2f';
       statusDiv.style.padding = '12px';
       statusDiv.style.borderRadius = '4px';
-      statusDiv.innerHTML = `❌ Error: ${err.message}`;
+      
+      let friendlyMessage = 'An error occurred while submitting the dispensation.';
+      if (err.message.includes('Failed to fetch')) {
+        friendlyMessage = '⚠️ Could not reach the server. Please check your connection and try again.';
+      } else if (err.message.includes('401') || err.message.includes('403')) {
+        friendlyMessage = '🔐 Authentication issue. Please login again and try submitting.';
+      } else if (err.message) {
+        friendlyMessage = `⚠️ ${err.message}`;
+      }
+      
+      statusDiv.innerHTML = `❌ ${friendlyMessage}`;
     } finally {
       submitBtn.disabled = false;
       submitBtn.textContent = 'Submit Dispensation';
