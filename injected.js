@@ -24,6 +24,60 @@
     const checkedMedications = new Map();
     let clinicData = null;
     let apiEndpoint = 'http://localhost:8000'; // Default endpoint
+    
+    // Fetch helper that goes through content script (bypasses CORS/mixed content)
+    const pendingFetches = new Map();
+    let fetchRequestId = 0;
+    
+    function contentScriptFetch(url, options = {}) {
+      return new Promise((resolve, reject) => {
+        const requestId = ++fetchRequestId;
+        
+        // Store the promise handlers
+        pendingFetches.set(requestId, { resolve, reject });
+        
+        // Send request to content script
+        window.postMessage({
+          type: 'FETCH_REQUEST',
+          requestId: requestId,
+          url: url,
+          options: options
+        }, '*');
+        
+        // Timeout after 30 seconds
+        setTimeout(() => {
+          if (pendingFetches.has(requestId)) {
+            pendingFetches.delete(requestId);
+            reject(new Error('Fetch request timed out'));
+          }
+        }, 30000);
+      });
+    }
+    
+    // Listen for fetch responses from content script
+    window.addEventListener('message', function(event) {
+      if (event.source !== window) return;
+      
+      if (event.data.type === 'FETCH_RESPONSE') {
+        const { requestId, success, data, error, status, ok } = event.data;
+        const pending = pendingFetches.get(requestId);
+        
+        if (pending) {
+          pendingFetches.delete(requestId);
+          
+          if (success) {
+            pending.resolve({
+              ok: ok,
+              status: status,
+              json: async () => data,
+              data: data
+            });
+          } else {
+            pending.reject(new Error(error));
+          }
+        }
+      }
+    });
   
     // LISTEN FOR CLINIC DATA FROM CONTENT SCRIPT
     window.addEventListener('message', function(event) {
@@ -173,16 +227,16 @@
         console.log('[API] Calling endpoint: GET', endpoint);
         console.log("Calling inventory API:", endpoint);
         
-        const response = await fetch(endpoint, {
+        // Use content script bridge to bypass CORS/mixed content
+        const response = await contentScriptFetch(endpoint, {
           method: 'GET',
           headers: {
             'Content-Type': 'application/json',
-          },
-          credentials: 'include'
+          }
         });
 
         if (!response.ok) {
-          throw new Error(`API error: ${response.status} ${response.statusText}`);
+          throw new Error(`API error: ${response.status}`);
         }
 
         const data = await response.json();

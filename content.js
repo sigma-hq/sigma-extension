@@ -14,6 +14,67 @@ let authTokens = {
   refresh: null
 };
 
+// ==========================================
+// BACKGROUND FETCH HELPER (bypasses CORS and mixed content)
+// ==========================================
+
+async function backgroundFetch(url, options = {}) {
+  console.log('[HMIS] backgroundFetch REQUEST:', {
+    url,
+    method: options.method || 'GET',
+    headers: Object.keys(options.headers || {})
+  });
+  
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage(
+      {
+        action: 'fetch',
+        url: url,
+        options: {
+          method: options.method || 'GET',
+          headers: options.headers || {},
+          body: options.body || undefined
+        }
+      },
+      (response) => {
+        if (chrome.runtime.lastError) {
+          console.error('[HMIS] backgroundFetch ERROR:', chrome.runtime.lastError.message);
+          reject(new Error(chrome.runtime.lastError.message));
+          return;
+        }
+        
+        if (response.error) {
+          console.error('[HMIS] backgroundFetch FAILED:', response);
+          const error = new Error(response.message);
+          error.name = response.name;
+          reject(error);
+          return;
+        }
+        
+        console.log('[HMIS] backgroundFetch RESPONSE:', {
+          url,
+          status: response.status,
+          ok: response.ok
+        });
+        
+        // Create a response-like object
+        resolve({
+          ok: response.ok,
+          status: response.status,
+          statusText: response.statusText,
+          headers: { 
+            get: (name) => response.headers?.[name.toLowerCase()],
+            entries: () => Object.entries(response.headers || {})
+          },
+          json: async () => response.isJson ? response.data : JSON.parse(response.data),
+          text: async () => typeof response.data === 'string' ? response.data : JSON.stringify(response.data),
+          data: response.data
+        });
+      }
+    );
+  });
+}
+
 // Load tokens from storage
 async function loadAuthTokens() {
   return new Promise((resolve) => {
@@ -57,7 +118,7 @@ async function isAuthenticated() {
     const url = `${baseUrl}/api/token/verify/`;
     
     console.log('[API] Calling endpoint: POST', url);
-    const response = await fetch(url, {
+    const response = await backgroundFetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ token: authTokens.access })
@@ -79,7 +140,7 @@ async function refreshAccessToken() {
   const url = `${baseUrl}/api/token/refresh/`;
   
   console.log('[API] Calling endpoint: POST', url);
-  const response = await fetch(url, {
+  const response = await backgroundFetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ refresh: authTokens.refresh })
@@ -140,7 +201,7 @@ async function authenticatedFetch(url, options = {}) {
   
   try {
     console.log('[Auth] Making fetch request...');
-    let response = await fetch(url, options);
+    let response = await backgroundFetch(url, options);
     console.log('[Auth] Fetch completed - Status:', response.status, 'OK:', response.ok);
     
     // If 401, try to refresh token
@@ -152,7 +213,7 @@ async function authenticatedFetch(url, options = {}) {
         // Retry with new token
         options.headers['Authorization'] = `Bearer ${newAccess}`;
         console.log('[Auth] Retrying request with new token...');
-        response = await fetch(url, options);
+        response = await backgroundFetch(url, options);
         console.log('[Auth] Retry completed - Status:', response.status, 'OK:', response.ok);
       } catch (err) {
         console.error('[Auth] Token refresh failed:', err);
@@ -320,10 +381,10 @@ async function showOverlay(uuid, displayId) {
         res = await authenticatedFetch(url);
       } catch (err) {
         // If auth fails, try without auth (for backward compatibility)
-        res = await fetch(url);
+        res = await backgroundFetch(url);
       }
     } else {
-      res = await fetch(url);
+      res = await backgroundFetch(url);
     }
     
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -822,7 +883,7 @@ function renderSettingsTab() {
         
         console.log('[API] Calling endpoint: GET', testUrl);
         console.log('[Settings] Testing connection to:', testUrl);
-        const response = await fetch(testUrl, {
+        const response = await backgroundFetch(testUrl, {
           method: 'GET',
           headers: {
             'Content-Type': 'application/json',
@@ -1000,7 +1061,7 @@ function renderLoginForm(container) {
       const url = `${baseUrl}/api/token/`;
       
       console.log('[API] Calling endpoint: POST', url);
-      const response = await fetch(url, {
+      const response = await backgroundFetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, password })
@@ -1777,7 +1838,7 @@ async function sendClinicDataToInjectedScript(clinicData) {
 }
 
 // Listen for requests from injected script
-window.addEventListener('message', function(event) {
+window.addEventListener('message', async function(event) {
   if (event.source !== window) return;
   
   if (event.data.type === 'INVENTORY_CHECK') {
@@ -1788,6 +1849,34 @@ window.addEventListener('message', function(event) {
     chrome.storage.local.get(['clinicId', 'clinicName', 'clinicCode', 'patientUuid'], (result) => {
       sendClinicDataToInjectedScript(result);
     });
+  }
+  
+  // Handle fetch requests from injected script (bypasses CORS/mixed content)
+  if (event.data.type === 'FETCH_REQUEST') {
+    const { requestId, url, options } = event.data;
+    console.log('[HMIS] Fetch request from injected script:', url);
+    
+    try {
+      const response = await backgroundFetch(url, options);
+      const data = await response.json().catch(() => response.data);
+      
+      window.postMessage({
+        type: 'FETCH_RESPONSE',
+        requestId: requestId,
+        success: true,
+        data: data,
+        status: response.status,
+        ok: response.ok
+      }, '*');
+    } catch (err) {
+      console.error('[HMIS] Fetch error for injected script:', err);
+      window.postMessage({
+        type: 'FETCH_RESPONSE',
+        requestId: requestId,
+        success: false,
+        error: err.message
+      }, '*');
+    }
   }
 });
 
