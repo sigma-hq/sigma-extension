@@ -6,6 +6,233 @@ let isCollapsed = false;
 let currentVisitData = null;
 
 // ==========================================
+// AUTHENTICATION STATE & HELPERS
+// ==========================================
+
+let authTokens = {
+  access: null,
+  refresh: null
+};
+
+// ==========================================
+// BACKGROUND FETCH HELPER (bypasses CORS and mixed content)
+// ==========================================
+
+async function backgroundFetch(url, options = {}) {
+  console.log('[HMIS] backgroundFetch REQUEST:', {
+    url,
+    method: options.method || 'GET',
+    headers: Object.keys(options.headers || {})
+  });
+  
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage(
+      {
+        action: 'fetch',
+        url: url,
+        options: {
+          method: options.method || 'GET',
+          headers: options.headers || {},
+          body: options.body || undefined
+        }
+      },
+      (response) => {
+        if (chrome.runtime.lastError) {
+          console.error('[HMIS] backgroundFetch ERROR:', chrome.runtime.lastError.message);
+          reject(new Error(chrome.runtime.lastError.message));
+          return;
+        }
+        
+        if (response.error) {
+          console.error('[HMIS] backgroundFetch FAILED:', response);
+          const error = new Error(response.message);
+          error.name = response.name;
+          reject(error);
+          return;
+        }
+        
+        console.log('[HMIS] backgroundFetch RESPONSE:', {
+          url,
+          status: response.status,
+          ok: response.ok
+        });
+        
+        // Create a response-like object
+        resolve({
+          ok: response.ok,
+          status: response.status,
+          statusText: response.statusText,
+          headers: { 
+            get: (name) => response.headers?.[name.toLowerCase()],
+            entries: () => Object.entries(response.headers || {})
+          },
+          json: async () => response.isJson ? response.data : JSON.parse(response.data),
+          text: async () => typeof response.data === 'string' ? response.data : JSON.stringify(response.data),
+          data: response.data
+        });
+      }
+    );
+  });
+}
+
+// Load tokens from storage
+async function loadAuthTokens() {
+  return new Promise((resolve) => {
+    chrome.storage.local.get(['authAccess', 'authRefresh'], (result) => {
+      authTokens.access = result.authAccess || null;
+      authTokens.refresh = result.authRefresh || null;
+      resolve(authTokens);
+    });
+  });
+}
+
+// Save tokens to storage
+async function saveAuthTokens(access, refresh) {
+  authTokens.access = access;
+  authTokens.refresh = refresh;
+  return new Promise((resolve) => {
+    chrome.storage.local.set({
+      authAccess: access,
+      authRefresh: refresh
+    }, resolve);
+  });
+}
+
+// Clear tokens
+async function clearAuthTokens() {
+  authTokens.access = null;
+  authTokens.refresh = null;
+  return new Promise((resolve) => {
+    chrome.storage.local.remove(['authAccess', 'authRefresh'], resolve);
+  });
+}
+
+// Check if authenticated
+async function isAuthenticated() {
+  await loadAuthTokens();
+  if (!authTokens.access) return false;
+  
+  // Verify token is still valid
+  try {
+    const baseUrl = await getApiEndpoint();
+    const url = `${baseUrl}/api/token/verify/`;
+    
+    console.log('[API] Calling endpoint: POST', url);
+    const response = await backgroundFetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: authTokens.access })
+    });
+    
+    return response.ok;
+  } catch (err) {
+    return false;
+  }
+}
+
+// Refresh access token
+async function refreshAccessToken() {
+  if (!authTokens.refresh) {
+    throw new Error('No refresh token available');
+  }
+  
+  const baseUrl = await getApiEndpoint();
+  const url = `${baseUrl}/api/token/refresh/`;
+  
+  console.log('[API] Calling endpoint: POST', url);
+  const response = await backgroundFetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ refresh: authTokens.refresh })
+  });
+  
+  if (!response.ok) {
+    await clearAuthTokens();
+    throw new Error('Token refresh failed');
+  }
+  
+  const data = await response.json();
+  await saveAuthTokens(data.access, data.refresh || authTokens.refresh);
+  return data.access;
+}
+
+// Get API endpoint from storage
+async function getApiEndpoint() {
+  const storage = await new Promise((resolve) => {
+    chrome.storage.local.get(['apiEndpoint'], resolve);
+  });
+  const endpoint = storage.apiEndpoint || 'http://localhost:8000';
+  // Remove trailing slash if present, we'll add it per endpoint as needed
+  return endpoint.replace(/\/$/, '');
+}
+
+// Get authenticated fetch headers
+async function getAuthHeaders() {
+  await loadAuthTokens();
+  
+  if (!authTokens.access) {
+    return {};
+  }
+  
+  return {
+    'Authorization': `Bearer ${authTokens.access}`,
+    'Content-Type': 'application/json'
+  };
+}
+
+// Authenticated fetch with auto-refresh
+async function authenticatedFetch(url, options = {}) {
+  console.log('[Auth] authenticatedFetch called for URL:', url);
+  console.log('[Auth] Options:', JSON.stringify(options, null, 2));
+  
+  await loadAuthTokens();
+  console.log('[Auth] Tokens loaded - Access:', !!authTokens.access, 'Refresh:', !!authTokens.refresh);
+  
+  // Add auth header
+  const headers = await getAuthHeaders();
+  console.log('[Auth] Headers to send:', Object.keys(headers));
+  options.headers = { ...headers, ...options.headers };
+  
+  console.log('[Auth] Final request options:', {
+    method: options.method || 'GET',
+    headers: Object.keys(options.headers),
+    hasBody: !!options.body
+  });
+  
+  try {
+    console.log('[Auth] Making fetch request...');
+    let response = await backgroundFetch(url, options);
+    console.log('[Auth] Fetch completed - Status:', response.status, 'OK:', response.ok);
+    
+    // If 401, try to refresh token
+    if (response.status === 401 && authTokens.refresh) {
+      console.log('[Auth] Got 401, attempting token refresh...');
+      try {
+        const newAccess = await refreshAccessToken();
+        console.log('[Auth] Token refreshed successfully');
+        // Retry with new token
+        options.headers['Authorization'] = `Bearer ${newAccess}`;
+        console.log('[Auth] Retrying request with new token...');
+        response = await backgroundFetch(url, options);
+        console.log('[Auth] Retry completed - Status:', response.status, 'OK:', response.ok);
+      } catch (err) {
+        console.error('[Auth] Token refresh failed:', err);
+        await clearAuthTokens();
+        throw new Error('Authentication expired. Please login again.');
+      }
+    }
+    
+    return response;
+  } catch (err) {
+    console.error('[Auth] Fetch error:', err);
+    console.error('[Auth] Error name:', err.name);
+    console.error('[Auth] Error message:', err.message);
+    console.error('[Auth] Error stack:', err.stack);
+    throw err;
+  }
+}
+
+// ==========================================
 // PART 1: PATIENT DATA EXTRACTION & OVERLAY
 // ==========================================
 
@@ -47,8 +274,8 @@ async function showOverlay(uuid, displayId) {
   overlay.style.borderRadius = '10px';
   overlay.style.boxShadow = '0 4px 12px rgba(0,0,0,0.15)';
   overlay.style.fontFamily = 'system-ui, sans-serif';
-  overlay.style.minWidth = '420px';
-  overlay.style.maxWidth = '500px';
+  overlay.style.minWidth = '650px';
+  overlay.style.maxWidth = '800px';
   overlay.style.transition = 'all 0.3s ease';
   overlay.style.margin = '0 20px 20px 0';
 
@@ -69,6 +296,7 @@ async function showOverlay(uuid, displayId) {
         <button class="hmis-tab" data-tab="insurance" style="flex:1; padding:10px; border:none; background:transparent; cursor:pointer; font-size:13px; font-weight:500; border-bottom: 2px solid transparent; display:none; outline:none;">Insurance</button>
         <button class="hmis-tab" data-tab="dental" style="flex:1; padding:10px; border:none; background:transparent; cursor:pointer; font-size:13px; font-weight:500; border-bottom: 2px solid transparent; display:none; outline:none;">Dental</button>
         <button class="hmis-tab" data-tab="notes" style="flex:1; padding:10px; border:none; background:transparent; cursor:pointer; font-size:13px; font-weight:500; border-bottom: 2px solid transparent; display:none; outline:none;">Notes</button>
+        <button class="hmis-tab" data-tab="ordering" style="flex:1; padding:10px; border:none; background:transparent; cursor:pointer; font-size:13px; font-weight:500; border-bottom: 2px solid transparent; outline:none;">💊 Ordering</button>
         <button class="hmis-tab" data-tab="settings" style="flex:1; padding:10px; border:none; background:transparent; cursor:pointer; font-size:13px; font-weight:500; border-bottom: 2px solid transparent; outline:none;">⚙ Settings</button>
       </div>
 
@@ -138,19 +366,27 @@ async function showOverlay(uuid, displayId) {
   });
 
   try {
-    // Get API endpoint from storage (default to localhost if not set)
-    const storage = await new Promise((resolve) => {
-      chrome.storage.local.get(['apiEndpoint'], resolve);
-    });
-    const apiEndpoint = storage.apiEndpoint || 'http://localhost:8000';
-    
-    // Remove trailing slash if present
-    const baseUrl = apiEndpoint.replace(/\/$/, '');
+    // Get API endpoint from storage - use exactly as configured
+    const baseUrl = await getApiEndpoint();
     const url = `${baseUrl}/api/visits/summary/by-patient-uuid/${uuid}/`;
     
+    console.log('[API] Calling endpoint: GET', url);
     console.log("Fetching visit summary from:", url);
     
-    const res = await fetch(url);
+    // Try authenticated fetch if token available, otherwise regular fetch
+    let res;
+    await loadAuthTokens();
+    if (authTokens.access) {
+      try {
+        res = await authenticatedFetch(url);
+      } catch (err) {
+        // If auth fails, try without auth (for backward compatibility)
+        res = await backgroundFetch(url);
+      }
+    } else {
+      res = await backgroundFetch(url);
+    }
+    
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
 
@@ -217,18 +453,24 @@ async function showOverlay(uuid, displayId) {
     showTab('visit');
 
   } catch (err) {
-    let errorMessage = err.message;
+    let errorMessage = 'Unable to connect to the API server.';
     
-    if (err.message.includes('Failed to fetch') || err.message.includes('ERR_CERT_AUTHORITY_INVALID')) {
-      errorMessage = 'Certificate error or connection failed. If using HTTPS with a self-signed certificate, you may need to accept it in your browser first.';
+    if (err.message.includes('Failed to fetch')) {
+      errorMessage = 'Could not reach the API server. Please check your connection and ensure the server is running.';
     } else if (err.message.includes('CORS')) {
-      errorMessage = 'CORS error: The API server may not allow requests from this origin.';
+      errorMessage = 'The API server may not allow requests from this origin. Please check your server configuration.';
+    } else if (err.message.includes('401') || err.message.includes('403')) {
+      errorMessage = 'Authentication issue. Please check your login credentials or API permissions.';
+    } else if (err.message.includes('404')) {
+      errorMessage = 'The requested endpoint was not found. Please verify your API endpoint configuration.';
+    } else if (err.message) {
+      errorMessage = `Connection error: ${err.message}`;
     }
     
     overlay.querySelector('#hmis-content').innerHTML = `
       <div style="color:#d32f2f; padding:12px; background:#ffebee; border-radius:4px;">
-        <strong>Failed to load summary</strong><br/>
-        <small>${errorMessage}</small><br/>
+        <strong>⚠️ Unable to Load Visit Summary</strong><br/>
+        <small style="margin-top:8px; display:block;">${errorMessage}</small><br/>
         <small style="margin-top:8px; display:block;">
           <a href="#" id="configure-endpoint-link" style="color:#00897B; text-decoration:underline; cursor:pointer;">Configure API endpoint</a>
         </small>
@@ -326,6 +568,9 @@ function showTab(tabName) {
       break;
     case 'settings':
       renderSettingsTab();
+      break;
+    case 'ordering':
+      renderOrderingTab();
       break;
   }
 }
@@ -582,15 +827,15 @@ function renderSettingsTab() {
         </div>
         
         <div style="background: #e3f2fd; border-left: 4px solid #2196F3; padding: 12px; margin-top: 16px; border-radius: 4px; font-size: 12px; color: #1565C0;">
-          <strong>ℹ️ About Certificate Errors</strong>
+          <strong>ℹ️ Troubleshooting Tips</strong>
           <p style="margin: 5px 0 0 0;">
-            If you're using HTTPS with a self-signed certificate and seeing "ERR_CERT_AUTHORITY_INVALID" errors:
+            If you're experiencing connection issues:
           </p>
           <ul style="margin: 5px 0; padding-left: 20px;">
-            <li>Click the certificate error in your browser's address bar</li>
-            <li>Select "Advanced" and then "Proceed to [site] (unsafe)"</li>
-            <li>This will allow the browser to accept the certificate for this session</li>
-            <li>For production, use a valid SSL certificate from a trusted authority</li>
+            <li>Ensure your API server is running and accessible</li>
+            <li>Verify the endpoint URL is correct (including protocol and port)</li>
+            <li>Check that your server allows requests from this origin (CORS settings)</li>
+            <li>For local development, use <code>http://localhost:8000</code> instead of HTTPS</li>
           </ul>
         </div>
       </div>
@@ -642,7 +887,9 @@ function renderSettingsTab() {
         const baseUrl = endpoint.replace(/\/$/, '');
         const testUrl = `${baseUrl}/api/visits/summary/by-patient-uuid/test/`;
         
-        const response = await fetch(testUrl, {
+        console.log('[API] Calling endpoint: GET', testUrl);
+        console.log('[Settings] Testing connection to:', testUrl);
+        const response = await backgroundFetch(testUrl, {
           method: 'GET',
           headers: {
             'Content-Type': 'application/json',
@@ -659,13 +906,18 @@ function renderSettingsTab() {
         let statusColor = '#d32f2f';
         let statusBg = '#ffebee';
         
-        if (err.message.includes('Failed to fetch') || err.message.includes('ERR_CERT_AUTHORITY_INVALID')) {
-          statusMessage = '❌ Certificate error detected. You need to accept the certificate in your browser first.';
-          statusMessage += '<br><br><strong>Solution:</strong> Open <a href="' + endpoint + '" target="_blank" style="color: #00897B; text-decoration: underline;">' + endpoint + '</a> in a new tab, accept the certificate warning, then try again.';
+        if (err.message.includes('Failed to fetch')) {
+          statusMessage = '❌ Could not reach the server. Please check that:<br>';
+          statusMessage += '<ul style="margin: 8px 0; padding-left: 20px;">';
+          statusMessage += '<li>The server is running</li>';
+          statusMessage += '<li>The URL is correct</li>';
+          statusMessage += '<li>Your network connection is active</li>';
+          statusMessage += '</ul>';
+          statusMessage += '<br>Try opening <a href="' + endpoint + '" target="_blank" style="color: #00897B; text-decoration: underline;">' + endpoint + '</a> in a new tab to verify the server is accessible.';
         } else if (err.message.includes('CORS')) {
-          statusMessage = '⚠️ CORS error: The server may not allow requests from this origin.';
+          statusMessage = '⚠️ CORS error: The server may not allow requests from this origin. Please check your server\'s CORS configuration.';
         } else if (err.message.includes('ERR_CONNECTION_REFUSED')) {
-          statusMessage = '❌ Connection refused. Check if the server is running and the URL is correct.';
+          statusMessage = '❌ Connection refused. The server may not be running, or the URL/port is incorrect.';
         } else {
           statusMessage = '❌ Connection failed: ' + err.message;
         }
@@ -728,6 +980,749 @@ function renderSettingsTab() {
         }
       });
     });
+  });
+}
+
+function renderOrderingTab() {
+  const content = overlay.querySelector('#hmis-content');
+  
+  // Check authentication first
+  isAuthenticated().then(authenticated => {
+    if (!authenticated) {
+      // Show login form
+      renderLoginForm(content);
+    } else {
+      // Show ordering interface
+      renderOrderingInterface(content);
+    }
+  });
+}
+
+function renderLoginForm(container) {
+  container.innerHTML = `
+    <div style="padding: 0;">
+      <h3 style="margin: 0 0 16px 0; font-size: 14px; color: #00897B;">Authentication Required</h3>
+      <p style="font-size: 12px; color: #666; margin-bottom: 16px;">
+        Please login to access ordering and billing functionality.
+      </p>
+      
+      <form id="hmis-login-form">
+        <div style="margin-bottom: 16px;">
+          <label style="display: block; margin-bottom: 8px; font-weight: 500; color: #333; font-size: 13px;">
+            Email
+          </label>
+          <input 
+            type="email" 
+            id="hmis-login-email" 
+            required
+            placeholder="your.email@example.com"
+            style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px; box-sizing: border-box;"
+          />
+        </div>
+        
+        <div style="margin-bottom: 16px;">
+          <label style="display: block; margin-bottom: 8px; font-weight: 500; color: #333; font-size: 13px;">
+            Password
+          </label>
+          <input 
+            type="password" 
+            id="hmis-login-password" 
+            required
+            placeholder="Enter your password"
+            style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px; box-sizing: border-box;"
+          />
+        </div>
+        
+        <button 
+          type="submit" 
+          style="background: #00897B; color: white; border: none; padding: 10px 20px; border-radius: 4px; font-size: 13px; font-weight: 500; cursor: pointer; width: 100%;"
+        >
+          Login
+        </button>
+      </form>
+      
+      <div id="hmis-login-error" style="color: #d32f2f; font-size: 12px; margin-top: 12px; display: none;"></div>
+      <div id="hmis-login-success" style="background: #e8f5e9; color: #2e7d32; padding: 12px; border-radius: 4px; margin-top: 16px; display: none; font-size: 13px;">
+        Login successful! Loading ordering interface...
+      </div>
+    </div>
+  `;
+  
+  const form = container.querySelector('#hmis-login-form');
+  const errorDiv = container.querySelector('#hmis-login-error');
+  const successDiv = container.querySelector('#hmis-login-success');
+  
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    
+    errorDiv.style.display = 'none';
+    successDiv.style.display = 'none';
+    
+    const email = container.querySelector('#hmis-login-email').value.trim();
+    const password = container.querySelector('#hmis-login-password').value;
+    
+    if (!email || !password) {
+      errorDiv.textContent = 'Please enter both email and password';
+      errorDiv.style.display = 'block';
+      return;
+    }
+    
+    try {
+      const baseUrl = await getApiEndpoint();
+      const url = `${baseUrl}/api/token/`;
+      
+      console.log('[API] Calling endpoint: POST', url);
+      const response = await backgroundFetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password })
+      });
+      
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.detail || 'Login failed. Please check your credentials.');
+      }
+      
+      const data = await response.json();
+      await saveAuthTokens(data.access, data.refresh);
+      
+      successDiv.style.display = 'block';
+      
+      // Reload ordering interface after successful login
+      setTimeout(() => {
+        renderOrderingInterface(container);
+      }, 1000);
+      
+    } catch (err) {
+      errorDiv.textContent = err.message || 'Login failed. Please try again.';
+      errorDiv.style.display = 'block';
+    }
+  });
+}
+
+async function renderOrderingInterface(container) {
+  // Check if we have visit data
+  if (!currentVisitData) {
+    container.innerHTML = `
+      <div style="padding: 20px; text-align: center; color: #666;">
+        <p>Please wait for visit data to load, or navigate to a patient page.</p>
+      </div>
+    `;
+    return;
+  }
+  
+  const clinicId = currentVisitData.clinic_id || currentVisitData.clinic_details?.id || currentVisitData.clinic?.id;
+  const visitId = currentVisitData.visit_id || currentVisitData.id;
+  
+  if (!clinicId) {
+    container.innerHTML = `
+      <div style="padding: 20px; text-align: center; color: #d32f2f;">
+        <p>No clinic information available. Cannot proceed with ordering.</p>
+      </div>
+    `;
+    return;
+  }
+
+  // Payment / pricelist context
+  const modeOfPayment = currentVisitData.mode_of_payment || currentVisitData.visit?.mode_of_payment;
+  const insuranceName =
+    currentVisitData.insurance_scheme_details?.scheme_name ||
+    currentVisitData.insurance?.scheme_name ||
+    null;
+  const pricelistName =
+    currentVisitData.pricelist?.name ||
+    (modeOfPayment === 'insurance' ? insuranceName : null) ||
+    'Standard Pricelist';
+
+  // Render the interface (no location selection for now)
+  container.innerHTML = `
+    <div style="padding: 0;">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+        <h3 style="margin: 0; font-size: 14px; color: #00897B;">Ordering & Billing</h3>
+        <button id="hmis-logout-btn" style="background: #f44336; color: white; border: none; padding: 6px 12px; border-radius: 4px; font-size: 11px; cursor: pointer;">
+          Logout
+        </button>
+      </div>
+
+      <div style="margin-bottom: 16px; font-size: 12px; color: #555;">
+        <div><strong>Payment Mode:</strong> ${modeOfPayment || 'cash'}</div>
+        <div><strong>Price List:</strong> ${pricelistName}</div>
+        ${insuranceName ? `<div><strong>Insurance Scheme:</strong> ${insuranceName}</div>` : ''}
+      </div>
+      
+      <div id="hmis-products-section" style="margin-bottom: 16px;">
+        <label style="display: block; margin-bottom: 8px; font-weight: 500; color: #333; font-size: 13px;">
+          Search Products
+        </label>
+        <div style="display: flex; gap: 8px;">
+          <input 
+            type="text" 
+            id="hmis-product-search" 
+            placeholder="Search products..."
+            style="flex: 1; padding: 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px; box-sizing: border-box;"
+          />
+          <button 
+            id="hmis-load-products-btn"
+            style="background: #00897B; color: white; border: none; padding: 10px 16px; border-radius: 4px; font-size: 13px; cursor: pointer; white-space: nowrap;"
+          >
+            Load Products
+          </button>
+        </div>
+        
+        <div id="hmis-products-list" style="margin-top: 12px; max-height: 200px; overflow-y: auto; border: 1px solid #e0e0e0; border-radius: 4px; padding: 8px;">
+          <p style="text-align: center; color: #666;">Click "Load Products" or products will auto-load...</p>
+        </div>
+      </div>
+      
+      <div id="hmis-cart-section" style="margin-top: 16px;">
+        <h4 style="margin: 0 0 12px 0; font-size: 13px; color: #00897B;">Items to Dispense</h4>
+        <div id="hmis-cart-items" style="border: 1px solid #e0e0e0; border-radius: 4px; padding: 12px; min-height: 60px;">
+          <p style="color: #999; text-align: center; margin: 0;">No items added yet</p>
+        </div>
+        
+        <div style="margin-top: 12px;">
+          <label style="display: block; margin-bottom: 8px; font-weight: 500; color: #333; font-size: 13px;">
+            Notes (Optional)
+          </label>
+          <textarea 
+            id="hmis-dispense-notes" 
+            placeholder="Additional notes for this dispensation..."
+            style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px; box-sizing: border-box; min-height: 60px; resize: vertical;"
+          ></textarea>
+        </div>
+        
+        <button 
+          id="hmis-submit-dispense-btn"
+          disabled
+          style="background: #00897B; color: white; border: none; padding: 12px 24px; border-radius: 4px; font-size: 13px; font-weight: 500; cursor: pointer; width: 100%; margin-top: 16px; opacity: 0.5;"
+        >
+          Submit Dispensation
+        </button>
+      </div>
+      
+      <div id="hmis-dispense-status" style="margin-top: 16px; display: none;"></div>
+    </div>
+  `;
+  
+  // Setup event handlers
+  setupOrderingHandlers(container, clinicId, visitId);
+}
+
+function setupOrderingHandlers(container, clinicId, visitId) {
+  const productsSection = container.querySelector('#hmis-products-section');
+  const loadProductsBtn = container.querySelector('#hmis-load-products-btn');
+  const productSearch = container.querySelector('#hmis-product-search');
+  const productsList = container.querySelector('#hmis-products-list');
+  const cartItems = container.querySelector('#hmis-cart-items');
+  const submitBtn = container.querySelector('#hmis-submit-dispense-btn');
+  const dispenseNotes = container.querySelector('#hmis-dispense-notes');
+  const statusDiv = container.querySelector('#hmis-dispense-status');
+  const logoutBtn = container.querySelector('#hmis-logout-btn');
+  
+  let selectedLocationId = null; // optional, kept for future stock-deduction support
+  let products = [];
+  let cart = [];
+  
+  // Logout handler - FIXED
+  logoutBtn.addEventListener('click', async () => {
+    console.log('[Ordering] Logout button clicked');
+    await clearAuthTokens();
+    console.log('[Ordering] Auth tokens cleared');
+    // Re-render the ordering tab to show login form
+    renderOrderingTab();
+  });
+  
+  // Load all products from Odoo catalog - FIXED
+  async function loadAllProducts() {
+    try {
+      console.log('[Ordering] Loading all products from Odoo catalog');
+      
+      // Check authentication first
+      const authenticated = await isAuthenticated();
+      console.log('[Ordering] Authentication status:', authenticated);
+      
+      if (!authenticated) {
+        console.warn('[Ordering] Not authenticated - switching to login form');
+        renderLoginForm(container);
+        return;
+      }
+      
+      const baseUrl = await getApiEndpoint();
+      const url = `${baseUrl}/api/odoo/products/?get_all=true`;
+      
+      console.log('[API] Calling endpoint: GET', url);
+      console.log('[Ordering] API Endpoint:', baseUrl);
+      console.log('[Ordering] Full URL:', url);
+      
+      // Check authentication
+      await loadAuthTokens();
+      console.log('[Ordering] Auth token available:', !!authTokens.access);
+      if (authTokens.access) {
+        console.log('[Ordering] Auth token (first 20 chars):', authTokens.access.substring(0, 20) + '...');
+      }
+      
+      loadProductsBtn.disabled = true;
+      loadProductsBtn.textContent = 'Loading...';
+      productsList.innerHTML = '<p style="text-align: center; color: #666;">Loading products...</p>';
+      
+      console.log('[Ordering] Making authenticated fetch request...');
+      const response = await authenticatedFetch(url);
+      
+      console.log('[Ordering] Response status:', response.status);
+      console.log('[Ordering] Response ok:', response.ok);
+      console.log('[Ordering] Response headers:', Object.fromEntries(response.headers.entries()));
+      
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error('[Ordering] Response error body:', errorText);
+        let errorMessage = `Failed to load products (Status: ${response.status})`;
+        try {
+          const errorJson = JSON.parse(errorText);
+          errorMessage = errorJson.detail || errorJson.message || errorMessage;
+          console.error('[Ordering] Parsed error:', errorJson);
+        } catch (e) {
+          console.error('[Ordering] Could not parse error as JSON:', e);
+        }
+        throw new Error(errorMessage);
+      }
+      
+      const data = await response.json();
+      console.log('[Ordering] Products loaded successfully:', data);
+      console.log('[Ordering] Data type:', typeof data);
+      console.log('[Ordering] Is array:', Array.isArray(data));
+      console.log('[Ordering] Data keys:', data ? Object.keys(data) : 'null');
+      
+      // Handle response format: Odoo products endpoint returns { status: 'success', data: [...] }
+      let productsArray = null;
+      
+      if (Array.isArray(data)) {
+        productsArray = data;
+        console.log('[Ordering] Direct array response, products count:', productsArray.length);
+      } else if (data && typeof data === 'object') {
+        // Check for nested data structure
+        if (data.data && Array.isArray(data.data)) {
+          // Response wrapped in { status, data: [...] }
+          productsArray = data.data;
+          console.log('[Ordering] Loaded products from data.data:', productsArray.length);
+        } else if (data.results && Array.isArray(data.results)) {
+          // Paginated response
+          productsArray = data.results;
+          console.log('[Ordering] Loaded products from paginated response:', productsArray.length);
+        } else {
+          console.warn('[Ordering] Unexpected response format - no array found in data:', data);
+          console.warn('[Ordering] Response keys:', Object.keys(data));
+          if (data.data) {
+            console.warn('[Ordering] data.data type:', typeof data.data, 'isArray:', Array.isArray(data.data));
+          }
+        }
+      }
+      
+      if (!productsArray) {
+        console.error('[Ordering] Could not extract products array from response');
+        products = [];
+      } else {
+        products = productsArray;
+      }
+      
+      // Map Odoo products to expected format
+      products = products.map(p => ({
+        ...p,
+        // Use id as product_id for dispensation (Odoo product ID)
+        product_id: p.id,
+        // Map Odoo fields to expected format
+        product_name: p.name || p.product_name,
+        product_code: p.default_code || p.product_code || p.code,
+        list_price: p.list_price || 0,
+        odoo_id: p.id
+      }));
+      
+      console.log('[Ordering] Products array length:', products.length);
+      if (products.length > 0) {
+        console.log('[Ordering] First product:', products[0]);
+        console.log('[Ordering] Product odoo_id:', products[0].odoo_id, 'product_id:', products[0].product_id);
+      }
+      
+      renderProductsList();
+      
+    } catch (err) {
+      console.error('[Ordering] Error loading products:', err);
+      console.error('[Ordering] Error name:', err.name);
+      console.error('[Ordering] Error message:', err.message);
+      console.error('[Ordering] Error stack:', err.stack);
+      
+      let errorMessage = 'Unable to load products.';
+      
+      // Provide friendly, specific error messages
+      if (err.message.includes('Failed to fetch')) {
+        // Check if it's an HTTPS/HTTP mismatch
+        const storage = await new Promise((resolve) => {
+          chrome.storage.local.get(['apiEndpoint'], resolve);
+        });
+        const endpoint = storage.apiEndpoint || '';
+        
+        if (endpoint.startsWith('https://') && (endpoint.includes('localhost') || endpoint.includes('127.0.0.1') || endpoint.includes('192.168.'))) {
+          errorMessage = '⚠️ Protocol mismatch: The development server uses HTTP, not HTTPS. Please update your API endpoint to use http:// instead of https://';
+          console.error('[Ordering] HTTPS/HTTP mismatch detected');
+        } else {
+          errorMessage = '⚠️ Could not reach the server. Please check your connection and verify the API endpoint is correct.';
+          console.error('[Ordering] Network error - server may be unreachable');
+        }
+      } else if (err.message.includes('401')) {
+        errorMessage = '🔐 Authentication required. Please login again to access products.';
+        console.error('[Ordering] Authentication error - token may be expired');
+      } else if (err.message.includes('403')) {
+        errorMessage = '🚫 Access denied. You may not have permission to access this resource.';
+        console.error('[Ordering] Permission error');
+      } else if (err.message.includes('404')) {
+        errorMessage = '❓ Endpoint not found. Please verify your API endpoint configuration.';
+        console.error('[Ordering] Not found error');
+      } else if (err.message) {
+        errorMessage = `⚠️ ${err.message}`;
+      }
+      
+      productsList.innerHTML = `<div style="color: #d32f2f; text-align: center; padding: 12px; background: #ffebee; border-radius: 4px;">${errorMessage}</div>`;
+    } finally {
+      loadProductsBtn.disabled = false;
+      loadProductsBtn.textContent = 'Load Products';
+    }
+  }
+  
+  // Load products button handler
+  if (loadProductsBtn) {
+    loadProductsBtn.addEventListener('click', () => {
+      loadAllProducts();
+    });
+  } else {
+    console.error('[Ordering] Load products button not found!');
+  }
+  
+  // Auto-load products when ordering tab is opened - FIXED
+  console.log('[Ordering] Auto-loading products on tab open...');
+  setTimeout(() => {
+    loadAllProducts();
+  }, 100);
+  
+  // Render products list
+  function renderProductsList() {
+    const searchTerm = productSearch.value.toLowerCase();
+    // Get product IDs that are already in the cart
+    const cartProductIds = new Set(cart.map(item => item.product_id));
+    
+    const filtered = products.filter(p => {
+      // Filter out products already in cart
+      if (cartProductIds.has(p.product_id)) {
+        return false;
+      }
+      // Apply search filter (handle Odoo and mapped fields)
+      if (!searchTerm) return true;
+      const nameMatch = (p.product_name || p.name || '').toLowerCase().includes(searchTerm);
+      const codeMatch = (p.product_code || p.default_code || p.code || '').toLowerCase().includes(searchTerm);
+      return nameMatch || codeMatch;
+    });
+    
+    if (filtered.length === 0) {
+      productsList.innerHTML = '<p style="text-align: center; color: #666;">No products found</p>';
+      return;
+    }
+    
+    productsList.innerHTML = filtered.map(product => `
+      <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px; border-bottom: 1px solid #f0f0f0;">
+        <div style="flex: 1; min-width: 0;">
+          <div style="font-weight: 500; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 320px;">
+            ${product.product_name || product.name || 'Unknown Product'}
+          </div>
+          <div style="font-size: 11px; color: #666;">
+            Code: ${product.product_code || product.default_code || product.code || 'N/A'}
+            ${product.list_price ? ` | Price: ${product.list_price}` : ''}
+          </div>
+        </div>
+        <button 
+          class="hmis-add-product-btn" 
+          data-product-id="${product.product_id || product.odoo_id || product.id}"
+          data-product-name="${product.product_name || product.name || 'Unknown'}"
+          style="background: #00897B; color: white; border: none; padding: 6px 12px; border-radius: 4px; font-size: 11px; cursor: pointer;"
+        >
+          Add
+        </button>
+      </div>
+    `).join('');
+    
+    // Add click handlers - remove old listeners first to prevent duplicates
+    productsList.querySelectorAll('.hmis-add-product-btn').forEach(btn => {
+      // Clone button to remove all existing event listeners
+      const newBtn = btn.cloneNode(true);
+      btn.parentNode.replaceChild(newBtn, btn);
+      
+      newBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        
+        const productId = parseInt(newBtn.dataset.productId); // This is Odoo product ID
+        const productName = newBtn.dataset.productName;
+        
+        console.log('[Ordering] Add button clicked for product:', productId, productName);
+
+        // Find full product to get price
+        const product = products.find(
+          p => p.product_id === productId || p.id === productId || p.odoo_id === productId
+        );
+        const unitPrice = product && typeof product.list_price !== 'undefined'
+          ? parseFloat(product.list_price) || 0
+          : 0;
+        
+        // Check if already in cart
+        const existing = cart.find(item => item.product_id === productId);
+        if (existing) {
+          console.log('[Ordering] Product already in cart, incrementing quantity from', existing.quantity, 'to', existing.quantity + 1);
+          existing.quantity += 1;
+        } else {
+          console.log('[Ordering] Adding new product to cart:', productId, productName, 'quantity: 1');
+          cart.push({
+            product_id: productId, // Store Odoo product ID for dispensation
+            product_name: productName,
+            unit_price: unitPrice,
+            quantity: 1
+          });
+        }
+        
+        console.log('[Ordering] Cart after add:', JSON.stringify(cart, null, 2));
+        updateCart();
+        renderProductsList(); // Refresh products list to remove added item
+      });
+    });
+  }
+  
+  // Product search handler
+  productSearch.addEventListener('input', () => {
+    if (products.length > 0) {
+      renderProductsList();
+    }
+  });
+  
+  // Update cart display
+  function updateCart() {
+    if (cart.length === 0) {
+      cartItems.innerHTML = '<p style="color: #999; text-align: center; margin: 0;">No items added yet</p>';
+      submitBtn.disabled = true;
+      submitBtn.style.opacity = '0.5';
+    } else {
+      const cartTotal = cart.reduce(
+        (sum, item) => sum + (item.unit_price || 0) * (parseFloat(item.quantity) || 0),
+        0
+      );
+
+      const rowsHtml = cart.map((item, index) => {
+        const lineTotal = (item.unit_price || 0) * (parseFloat(item.quantity) || 0);
+        return `
+          <div style="display: flex; align-items: center; padding: 6px 8px; border-bottom: 1px solid #f0f0f0;">
+            <div style="flex: 2; min-width: 0;">
+              <div style="font-weight: 500; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 320px;">
+                ${item.product_name}
+              </div>
+            </div>
+            <div style="flex: 0.9; font-size: 12px; text-align: right; padding: 0 4px;">
+              ${formatCurrency(item.unit_price || 0)}
+            </div>
+            <div style="flex: 0.9; text-align: right; padding: 0 4px;">
+              <input 
+                type="number" 
+                min="0.01" 
+                step="0.01"
+                value="${item.quantity}"
+                data-index="${index}"
+                class="hmis-cart-quantity"
+                style="width: 70px; padding: 4px; border: 1px solid #ddd; border-radius: 4px; font-size: 12px; text-align: right;"
+              />
+            </div>
+            <div style="flex: 1.1; font-size: 12px; text-align: right; padding: 0 4px;">
+              ${formatCurrency(lineTotal)}
+            </div>
+            <div style="width: 70px; text-align: right; padding-left: 4px;">
+              <button 
+                class="hmis-remove-product-btn" 
+                data-index="${index}"
+                style="background: #f44336; color: white; border: none; padding: 4px 8px; border-radius: 4px; font-size: 11px; cursor: pointer;"
+              >
+                Remove
+              </button>
+            </div>
+          </div>
+        `;
+      }).join('');
+
+      cartItems.innerHTML = `
+        <div style="display: flex; font-size: 11px; font-weight: 600; padding: 4px 8px; border-bottom: 1px solid #e0e0e0; background: #fafafa;">
+          <div style="flex: 2;">Item</div>
+          <div style="flex: 0.9; text-align: right; padding: 0 4px;">Unit</div>
+          <div style="flex: 0.9; text-align: right; padding: 0 4px;">Qty</div>
+          <div style="flex: 1.1; text-align: right; padding: 0 4px;">Total</div>
+          <div style="width: 70px;"></div>
+        </div>
+        ${rowsHtml}
+        <div style="display: flex; justify-content: flex-end; padding: 8px 8px 4px 8px; border-top: 1px solid #e0e0e0; margin-top: 4px; font-size: 13px; font-weight: 600;">
+          <span style="margin-right: 8px;">Total:</span>
+          <span>${formatCurrency(cartTotal)}</span>
+        </div>
+      `;
+      
+      // Add handlers for quantity changes and removals
+      cartItems.querySelectorAll('.hmis-cart-quantity').forEach(input => {
+        input.addEventListener('change', (e) => {
+          const index = parseInt(e.target.dataset.index);
+          const newQty = parseFloat(e.target.value) || 0;
+          if (newQty > 0) {
+            cart[index].quantity = newQty;
+          } else {
+            cart.splice(index, 1);
+          }
+          updateCart();
+          renderProductsList(); // Refresh products list if item was removed
+        });
+      });
+      
+      cartItems.querySelectorAll('.hmis-remove-product-btn').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          const index = parseInt(e.target.dataset.index);
+          cart.splice(index, 1);
+          updateCart();
+          renderProductsList(); // Refresh products list to show removed item
+        });
+      });
+      
+      submitBtn.disabled = false;
+      submitBtn.style.opacity = '1';
+    }
+  }
+  
+  // Submit dispensation
+  submitBtn.addEventListener('click', async () => {
+    if (cart.length === 0) {
+      return;
+    }
+    
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Submitting...';
+    statusDiv.style.display = 'none';
+    
+    try {
+      const storage = await new Promise((resolve) => {
+        chrome.storage.local.get(['apiEndpoint'], resolve);
+      });
+      const baseUrl = await getApiEndpoint();
+      const url = `${baseUrl}/api/inventory/product-dispensation/from-helper/`;
+      
+      console.log('[API] Calling endpoint: POST', url);
+      console.log('[Ordering] Submitting dispensation to:', baseUrl);
+      // Get pricelist_id from visit data - check multiple possible locations
+      const pricelistId = currentVisitData?.pricelist?.id || 
+                         currentVisitData?.pricelist_id || 
+                         null;
+      
+      console.log('[Ordering] Current visit data:', JSON.stringify(currentVisitData, null, 2));
+      console.log('[Ordering] Pricelist ID extracted:', pricelistId);
+      console.log('[Ordering] Pricelist object:', currentVisitData?.pricelist);
+      
+      const payload = {
+        clinic_id: clinicId,
+        visit_id: visitId,
+        patient_uuid: currentUuid,
+        items: cart.map(item => ({
+          product_id: item.product_id, // This is odoo_id
+          quantity: item.quantity.toString()
+        })),
+        notes: dispenseNotes.value.trim() || 'Dispensed via helper',
+        sales_order_id: null,
+        location_id: selectedLocationId ? parseInt(selectedLocationId) : null
+      };
+      
+      // Only include pricelist_id if it exists (don't send null)
+      if (pricelistId) {
+        payload.pricelist_id = pricelistId;
+        console.log('[Ordering] Including pricelist_id in payload:', pricelistId);
+      } else {
+        console.warn('[Ordering] No pricelist_id found in visit data - not including in payload');
+      }
+      
+      console.log('[Ordering] Dispensation payload:', JSON.stringify(payload, null, 2));
+      
+      const response = await authenticatedFetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      
+      if (response.status === 201) {
+        const data = await response.json();
+        statusDiv.style.display = 'block';
+        statusDiv.style.background = '#e8f5e9';
+        statusDiv.style.color = '#2e7d32';
+        statusDiv.style.padding = '12px';
+        statusDiv.style.borderRadius = '4px';
+        statusDiv.innerHTML = `
+          ✅ Dispensation successful!<br>
+          Sales Order ID: ${data.sales_order_id || 'N/A'}<br>
+          <small>Items have been dispensed and sales order created/updated.</small>
+        `;
+        
+        // Clear cart completely - use length = 0 to maintain reference
+        console.log('[Ordering] Clearing cart after successful submission. Cart before clear:', cart.length, 'items');
+        console.log('[Ordering] Cart contents before clear:', JSON.stringify(cart, null, 2));
+        cart.length = 0; // Clear array in place to ensure all references see the cleared cart
+        console.log('[Ordering] Cart after clear:', cart.length, 'items');
+        console.log('[Ordering] Cart contents after clear:', JSON.stringify(cart, null, 2));
+        
+        updateCart();
+        dispenseNotes.value = '';
+        
+        // Reload products to refresh catalog and re-render list (this will show all products again since cart is empty)
+        await loadAllProducts();
+        
+        // Double-check: ensure products list is refreshed to show all products (cart is now empty)
+        console.log('[Ordering] Re-rendering products list after cart clear. Cart length:', cart.length);
+        renderProductsList();
+        
+      } else if (response.status === 400) {
+        const errorData = await response.json();
+        statusDiv.style.display = 'block';
+        statusDiv.style.background = '#ffebee';
+        statusDiv.style.color = '#d32f2f';
+        statusDiv.style.padding = '12px';
+        statusDiv.style.borderRadius = '4px';
+        
+        let errorMsg = 'Insufficient stock for some items:<br><ul style="margin: 8px 0; padding-left: 20px;">';
+        if (errorData.items) {
+          errorData.items.forEach(item => {
+            errorMsg += `<li>${item.product_name || `Product ${item.product_id}`}: Requested ${item.requested}, Available ${item.available}</li>`;
+          });
+        }
+        errorMsg += '</ul>';
+        statusDiv.innerHTML = errorMsg;
+        
+      } else {
+        throw new Error(`Server error: ${response.status}`);
+      }
+      
+    } catch (err) {
+      statusDiv.style.display = 'block';
+      statusDiv.style.background = '#ffebee';
+      statusDiv.style.color = '#d32f2f';
+      statusDiv.style.padding = '12px';
+      statusDiv.style.borderRadius = '4px';
+      
+      let friendlyMessage = 'An error occurred while submitting the dispensation.';
+      if (err.message.includes('Failed to fetch')) {
+        friendlyMessage = '⚠️ Could not reach the server. Please check your connection and try again.';
+      } else if (err.message.includes('401') || err.message.includes('403')) {
+        friendlyMessage = '🔐 Authentication issue. Please login again and try submitting.';
+      } else if (err.message) {
+        friendlyMessage = `⚠️ ${err.message}`;
+      }
+      
+      statusDiv.innerHTML = `❌ ${friendlyMessage}`;
+    } finally {
+      submitBtn.disabled = false;
+      submitBtn.textContent = 'Submit Dispensation';
+    }
   });
 }
 
@@ -852,11 +1847,8 @@ function injectInventoryMonitor(onInjectedCallback) {
 }
 
 async function sendClinicDataToInjectedScript(clinicData) {
-  // Get API endpoint from storage
-  const storage = await new Promise((resolve) => {
-    chrome.storage.local.get(['apiEndpoint'], resolve);
-  });
-  const apiEndpoint = storage.apiEndpoint || 'http://localhost:8000';
+  // Get API endpoint from storage - use exactly as configured
+  const apiEndpoint = await getApiEndpoint();
   
   window.postMessage({
     type: 'CLINIC_DATA',
@@ -869,7 +1861,7 @@ async function sendClinicDataToInjectedScript(clinicData) {
 }
 
 // Listen for requests from injected script
-window.addEventListener('message', function(event) {
+window.addEventListener('message', async function(event) {
   if (event.source !== window) return;
   
   if (event.data.type === 'INVENTORY_CHECK') {
@@ -881,11 +1873,44 @@ window.addEventListener('message', function(event) {
       sendClinicDataToInjectedScript(result);
     });
   }
+  
+  // Handle fetch requests from injected script (bypasses CORS/mixed content)
+  if (event.data.type === 'FETCH_REQUEST') {
+    const { requestId, url, options } = event.data;
+    console.log('[HMIS] Fetch request from injected script:', url);
+    
+    try {
+      const response = await backgroundFetch(url, options);
+      const data = await response.json().catch(() => response.data);
+      
+      window.postMessage({
+        type: 'FETCH_RESPONSE',
+        requestId: requestId,
+        success: true,
+        data: data,
+        status: response.status,
+        ok: response.ok
+      }, '*');
+    } catch (err) {
+      console.error('[HMIS] Fetch error for injected script:', err);
+      window.postMessage({
+        type: 'FETCH_RESPONSE',
+        requestId: requestId,
+        success: false,
+        error: err.message
+      }, '*');
+    }
+  }
 });
 
 // ==========================================
 // INITIALIZATION
 // ==========================================
+
+// Initialize auth tokens on load
+loadAuthTokens().then(() => {
+  console.log("Auth tokens loaded");
+});
 
 // Start patient extraction (this will trigger visit data fetch and inventory injection)
 extractPatient();
