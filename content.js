@@ -547,7 +547,12 @@ function showTab(tabName) {
       break;
     case 'insurance':
       if (currentVisitData?.insurance_scheme_details) {
-        content.innerHTML = renderInsuranceTab(currentVisitData.insurance_scheme_details);
+        // Merge date_joined from insurance_scheme if not in insurance_scheme_details
+        const insuranceData = { ...currentVisitData.insurance_scheme_details };
+        if (!insuranceData.date_joined && currentVisitData?.insurance_scheme?.date_joined) {
+          insuranceData.date_joined = currentVisitData.insurance_scheme.date_joined;
+        }
+        content.innerHTML = renderInsuranceTab(insuranceData);
       } else {
         content.innerHTML = '<p style="color: #666; text-align: center; padding: 20px;">No insurance information available</p>';
       }
@@ -701,6 +706,11 @@ function renderInsuranceTab(insurance) {
     ['Membership Number', insurance.membership_number],
     ['Suffix', insurance.suffix]
   ];
+
+  // Add date_joined if available
+  if (insurance.date_joined) {
+    rows.push(['Date Joined', insurance.date_joined]);
+  }
 
   return `
     <div style="margin-bottom: 12px;">
