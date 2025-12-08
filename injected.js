@@ -242,15 +242,18 @@
         const data = await response.json();
         console.log("Inventory response:", data);
 
-        // Extract available quantity from response
-        // Adjust this based on the actual response structure
-        const availableQty = data.quantity || data.available_quantity || data.stock_quantity || data.available || 0;
+        // Extract available quantity from response (using total_quantity from API)
+        const availableQty = data.total_quantity || data.quantity || data.available_quantity || data.stock_quantity || data.available || 0;
+        
+        // Store full inventory data including locations for overlay display
+        medData.inventoryData = data;
         
         console.log("Inventory check result:", {
           drugName: medData.drugName,
           requested: medData.quantity,
           available: availableQty,
-          status: availableQty >= medData.quantity ? 'OK' : 'LOW'
+          status: availableQty >= medData.quantity ? 'OK' : 'LOW',
+          locations: data.locations || []
         });
         
         if (medData.quantity && availableQty < medData.quantity) {
@@ -294,10 +297,19 @@
       indicator.innerHTML = `
         <i class="fa fa-exclamation-triangle" style="color: #f44336; margin-right: 5px;"></i>
         <span style="color: #f44336; font-weight: bold;">
-          Low Stock: ${available} ${medData.unit} available (need ${medData.quantity})
+          Low Stock: <span class="inventory-quantity-clickable" style="cursor: pointer; text-decoration: underline; text-decoration-style: dotted;" title="Click to view location details">${available} ${medData.unit}</span> available (need ${medData.quantity})
         </span>
       `;
       indicator.style.cssText = 'padding: 5px 10px; background: #ffebee; border-left: 3px solid #f44336; margin-top: 5px; font-size: 12px;';
+      
+      // Add click handler to show location overlay
+      const clickableQty = indicator.querySelector('.inventory-quantity-clickable');
+      if (clickableQty && medData.inventoryData) {
+        clickableQty.addEventListener('click', (e) => {
+          e.stopPropagation();
+          showLocationOverlay(medData);
+        });
+      }
       
       const dosageDetails = medData.element.querySelector('.dosage-details');
       if (dosageDetails && !medData.element.querySelector('.inventory-warning')) {
@@ -310,8 +322,17 @@
       
       const indicator = document.createElement('span');
       indicator.className = 'inventory-ok';
-      indicator.innerHTML = ` <i class="fa fa-check-circle" style="color: #4caf50;"></i>`;
+      indicator.innerHTML = ` <i class="fa fa-check-circle" style="color: #4caf50;"></i> <span class="inventory-quantity-clickable" style="cursor: pointer; text-decoration: underline; text-decoration-style: dotted; color: #4caf50; margin-left: 5px; font-weight: 500;" title="Click to view location details">${available} ${medData.unit}</span>`;
       indicator.style.cssText = 'margin-left: 10px;';
+      
+      // Add click handler to show location overlay
+      const clickableQty = indicator.querySelector('.inventory-quantity-clickable');
+      if (clickableQty && medData.inventoryData) {
+        clickableQty.addEventListener('click', (e) => {
+          e.stopPropagation();
+          showLocationOverlay(medData);
+        });
+      }
       
       const drugName = medData.element.querySelector('.drug-name');
       if (drugName && !medData.element.querySelector('.inventory-ok')) {
@@ -334,6 +355,194 @@
       if (dosageDetails && !medData.element.querySelector('.inventory-error')) {
         dosageDetails.appendChild(indicator);
       }
+    }
+
+    function showLocationOverlay(medData) {
+      // Remove existing overlay if present
+      const existingOverlay = document.getElementById('inventory-location-overlay');
+      if (existingOverlay) {
+        existingOverlay.remove();
+      }
+
+      const inventoryData = medData.inventoryData;
+      if (!inventoryData || !inventoryData.locations) {
+        console.warn("No location data available for overlay");
+        return;
+      }
+
+      // Create overlay backdrop
+      const overlay = document.createElement('div');
+      overlay.id = 'inventory-location-overlay';
+      overlay.style.cssText = `
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: rgba(0, 0, 0, 0.5);
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        z-index: 10000;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+      `;
+
+      // Create modal content
+      const modal = document.createElement('div');
+      modal.style.cssText = `
+        background: white;
+        border-radius: 8px;
+        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+        max-width: 600px;
+        width: 90%;
+        max-height: 80vh;
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+      `;
+
+      // Header
+      const header = document.createElement('div');
+      header.style.cssText = `
+        padding: 20px;
+        border-bottom: 1px solid #e0e0e0;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        background: #f8f9fa;
+      `;
+      
+      const headerContent = document.createElement('div');
+      headerContent.innerHTML = `
+        <h3 style="margin: 0; font-size: 18px; font-weight: 600; color: #333;">
+          ${inventoryData.product?.name || medData.drugName}
+        </h3>
+        <p style="margin: 5px 0 0 0; font-size: 13px; color: #666;">
+          Total Quantity: <strong style="color: #00897B;">${inventoryData.total_quantity || 0} ${medData.unit || ''}</strong>
+        </p>
+      `;
+      
+      const closeButton = document.createElement('button');
+      closeButton.innerHTML = '&times;';
+      closeButton.style.cssText = `
+        background: none;
+        border: none;
+        font-size: 28px;
+        color: #666;
+        cursor: pointer;
+        padding: 0;
+        width: 32px;
+        height: 32px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 4px;
+        transition: all 0.2s;
+      `;
+      closeButton.onmouseover = () => {
+        closeButton.style.background = '#e0e0e0';
+        closeButton.style.color = '#333';
+      };
+      closeButton.onmouseout = () => {
+        closeButton.style.background = 'none';
+        closeButton.style.color = '#666';
+      };
+      closeButton.onclick = () => overlay.remove();
+
+      header.appendChild(headerContent);
+      header.appendChild(closeButton);
+
+      // Body with locations list
+      const body = document.createElement('div');
+      body.style.cssText = `
+        padding: 20px;
+        overflow-y: auto;
+        flex: 1;
+      `;
+
+      if (inventoryData.locations && inventoryData.locations.length > 0) {
+        const locationsList = document.createElement('div');
+        locationsList.style.cssText = 'display: flex; flex-direction: column; gap: 12px;';
+
+        inventoryData.locations.forEach((location, index) => {
+          const locationItem = document.createElement('div');
+          locationItem.style.cssText = `
+            padding: 16px;
+            border: 1px solid #e0e0e0;
+            border-radius: 6px;
+            background: #fafafa;
+            transition: all 0.2s;
+          `;
+          locationItem.onmouseover = () => {
+            locationItem.style.background = '#f0f0f0';
+            locationItem.style.borderColor = '#00897B';
+          };
+          locationItem.onmouseout = () => {
+            locationItem.style.background = '#fafafa';
+            locationItem.style.borderColor = '#e0e0e0';
+          };
+
+          locationItem.innerHTML = `
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+              <div style="flex: 1;">
+                <div style="font-weight: 600; font-size: 15px; color: #333; margin-bottom: 6px;">
+                  ${location.location_name || 'Unknown Location'}
+                </div>
+                <div style="font-size: 13px; color: #666;">
+                  <span style="margin-right: 12px;">Code: <strong>${location.location_code || 'N/A'}</strong></span>
+                  <span>ID: <strong>${location.location_id || 'N/A'}</strong></span>
+                </div>
+              </div>
+              <div style="margin-left: 16px; text-align: right;">
+                <div style="font-size: 24px; font-weight: 600; color: #00897B;">
+                  ${location.quantity || 0}
+                </div>
+                <div style="font-size: 12px; color: #666; margin-top: 2px;">
+                  ${medData.unit || ''}
+                </div>
+              </div>
+            </div>
+          `;
+
+          locationsList.appendChild(locationItem);
+        });
+
+        body.appendChild(locationsList);
+      } else {
+        body.innerHTML = `
+          <div style="text-align: center; padding: 40px 20px; color: #999;">
+            <i class="fa fa-info-circle" style="font-size: 48px; margin-bottom: 16px; display: block;"></i>
+            <p style="margin: 0; font-size: 14px;">No location data available</p>
+          </div>
+        `;
+      }
+
+      // Assemble modal
+      modal.appendChild(header);
+      modal.appendChild(body);
+      overlay.appendChild(modal);
+
+      // Close on backdrop click
+      overlay.addEventListener('click', (e) => {
+        if (e.target === overlay) {
+          overlay.remove();
+        }
+      });
+
+      // Close on Escape key
+      const escapeHandler = (e) => {
+        if (e.key === 'Escape') {
+          overlay.remove();
+          document.removeEventListener('keydown', escapeHandler);
+        }
+      };
+      document.addEventListener('keydown', escapeHandler);
+
+      // Add to page
+      document.body.appendChild(overlay);
+
+      // Focus close button for accessibility
+      closeButton.focus();
     }
   
     async function processNewMedications() {
