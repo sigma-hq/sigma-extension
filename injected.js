@@ -489,8 +489,7 @@
                   ${location.location_name || 'Unknown Location'}
                 </div>
                 <div style="font-size: 13px; color: #666;">
-                  <span style="margin-right: 12px;">Code: <strong>${location.location_code || 'N/A'}</strong></span>
-                  <span>ID: <strong>${location.location_id || 'N/A'}</strong></span>
+                  Code: <strong>${location.location_code || 'N/A'}</strong>
                 </div>
               </div>
               <div style="margin-left: 16px; text-align: right;">
