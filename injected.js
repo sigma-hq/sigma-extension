@@ -575,9 +575,18 @@
           return;
         }
   
+        // Check if this medication was already checked
         if (checkedMedications.has(medData.uniqueId)) {
-          console.log(`Skipping item ${index} - already checked`);
-          return;
+          const previousMedData = checkedMedications.get(medData.uniqueId);
+          // Verify the previous element still exists in the DOM
+          if (previousMedData && previousMedData.element && document.contains(previousMedData.element)) {
+            console.log(`Skipping item ${index} - already checked and element still exists`);
+            return;
+          } else {
+            // Element was removed, so remove from checkedMedications and re-check
+            console.log(`Item ${index} was previously checked but element removed - will re-check`);
+            checkedMedications.delete(medData.uniqueId);
+          }
         }
   
         checkedMedications.set(medData.uniqueId, medData);
@@ -615,13 +624,41 @@
   
       const observer = new MutationObserver((mutations) => {
         let hasNewItems = false;
+        let hasRemovedItems = false;
         
         mutations.forEach(mutation => {
-          if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
-            hasNewItems = true;
+          if (mutation.type === 'childList') {
+            if (mutation.addedNodes.length > 0) {
+              hasNewItems = true;
+            }
+            if (mutation.removedNodes.length > 0) {
+              hasRemovedItems = true;
+            }
           }
         });
-  
+        
+        // Clean up removed items from checkedMedications
+        if (hasRemovedItems) {
+          console.log("DOM mutation detected - cleaning up removed medications");
+          const currentItems = document.querySelectorAll('#new-drug-orders');
+          const currentUniqueIds = new Set();
+          
+          currentItems.forEach(item => {
+            const medData = extractMedicationData(item);
+            if (medData && medData.uniqueId) {
+              currentUniqueIds.add(medData.uniqueId);
+            }
+          });
+          
+          // Remove any checked medications that are no longer in the DOM
+          for (const [uniqueId, medData] of checkedMedications.entries()) {
+            if (!currentUniqueIds.has(uniqueId) || !document.contains(medData.element)) {
+              console.log(`Removing checked medication from cache: ${medData.drugName} (${uniqueId})`);
+              checkedMedications.delete(uniqueId);
+            }
+          }
+        }
+        
         if (hasNewItems) {
           console.log("DOM mutation detected - processing medications");
           setTimeout(processNewMedications, 500);
