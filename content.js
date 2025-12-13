@@ -373,19 +373,8 @@ async function showOverlay(uuid, displayId) {
     console.log('[API] Calling endpoint: GET', url);
     console.log("Fetching visit summary from:", url);
     
-    // Try authenticated fetch if token available, otherwise regular fetch
-    let res;
-    await loadAuthTokens();
-    if (authTokens.access) {
-      try {
-        res = await authenticatedFetch(url);
-      } catch (err) {
-        // If auth fails, try without auth (for backward compatibility)
-        res = await backgroundFetch(url);
-      }
-    } else {
-      res = await backgroundFetch(url);
-    }
+    // Use regular fetch (authentication only needed for ordering tab)
+    const res = await backgroundFetch(url);
     
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
