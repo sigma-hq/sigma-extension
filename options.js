@@ -5,7 +5,7 @@ document.addEventListener('DOMContentLoaded', () => {
       document.getElementById('apiEndpoint').value = result.apiEndpoint;
     } else {
       // Set default
-      document.getElementById('apiEndpoint').value = 'http://localhost:8000';
+      document.getElementById('apiEndpoint').value = 'http://192.168.1.169:5000';
     }
   });
 });
@@ -36,7 +36,7 @@ document.getElementById('optionsForm').addEventListener('submit', (e) => {
       throw new Error('Protocol must be http:// or https://');
     }
   } catch (err) {
-    errorDiv.textContent = 'Please enter a valid URL (e.g., http://localhost:8000 or https://192.168.1.169:8000)';
+    errorDiv.textContent = 'Please enter a valid URL (e.g., http://192.168.1.169:5000)';
     errorDiv.style.display = 'block';
     return;
   }

@@ -108,15 +108,15 @@
     <form id="optionsForm">
       <div class="form-group">
         <label for="apiEndpoint">API Endpoint Base URL</label>
-        <input type="text" id="apiEndpoint" placeholder="http://localhost:8000 or https://192.168.1.169:8000" />
+        <input type="text" id="apiEndpoint" placeholder="http://192.168.1.169:5000" />
         <div class="error" id="endpointError"></div>
         <div class="help-text">
           Enter the base URL of your API server. Include the protocol (http:// or https://) and port if needed.
           <br><br>
           <strong>Examples:</strong>
           <ul style="margin: 5px 0; padding-left: 20px;">
+            <li>http://192.168.1.169:5000</li>
             <li>http://localhost:8000</li>
-            <li>https://192.168.1.169:8000</li>
             <li>https://api.example.com</li>
           </ul>
         </div>

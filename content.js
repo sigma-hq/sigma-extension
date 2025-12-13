@@ -161,7 +161,7 @@ async function getApiEndpoint() {
   const storage = await new Promise((resolve) => {
     chrome.storage.local.get(['apiEndpoint'], resolve);
   });
-  const endpoint = storage.apiEndpoint || 'http://localhost:8000';
+  const endpoint = storage.apiEndpoint || 'http://192.168.1.169:5000';
   // Remove trailing slash if present, we'll add it per endpoint as needed
   return endpoint.replace(/\/$/, '');
 }
@@ -771,7 +771,7 @@ function renderSettingsTab() {
   
   // Load current endpoint
   chrome.storage.local.get(['apiEndpoint'], (result) => {
-    const currentEndpoint = result.apiEndpoint || 'http://localhost:8000';
+    const currentEndpoint = result.apiEndpoint || 'http://192.168.1.169:5000';
     
     content.innerHTML = `
       <div style="padding: 0;">
@@ -786,7 +786,7 @@ function renderSettingsTab() {
               type="text" 
               id="hmis-api-endpoint" 
               value="${currentEndpoint}"
-              placeholder="http://localhost:8000 or https://192.168.1.169:8000"
+              placeholder="http://192.168.1.169:5000"
               style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px; box-sizing: border-box;"
             />
             <div id="hmis-endpoint-error" style="color: #d32f2f; font-size: 12px; margin-top: 5px; display: none;"></div>
@@ -795,8 +795,8 @@ function renderSettingsTab() {
               <br><br>
               <strong>Examples:</strong>
               <ul style="margin: 5px 0; padding-left: 20px;">
+                <li>http://192.168.1.169:5000</li>
                 <li>http://localhost:8000</li>
-                <li>https://192.168.1.169:8000</li>
                 <li>https://api.example.com</li>
               </ul>
             </div>
@@ -834,7 +834,7 @@ function renderSettingsTab() {
             <li>Ensure your API server is running and accessible</li>
             <li>Verify the endpoint URL is correct (including protocol and port)</li>
             <li>Check that your server allows requests from this origin (CORS settings)</li>
-            <li>For local development, use <code>http://localhost:8000</code> instead of HTTPS</li>
+            <li>Default endpoint is <code>http://192.168.1.169:5000</code></li>
           </ul>
         </div>
       </div>
@@ -953,7 +953,7 @@ function renderSettingsTab() {
           throw new Error('Protocol must be http:// or https://');
         }
       } catch (err) {
-        errorDiv.textContent = 'Please enter a valid URL (e.g., http://localhost:8000 or https://192.168.1.169:8000)';
+        errorDiv.textContent = 'Please enter a valid URL (e.g., http://192.168.1.169:5000)';
         errorDiv.style.display = 'block';
         return;
       }
