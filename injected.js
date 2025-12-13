@@ -23,7 +23,7 @@
   
     const checkedMedications = new Map();
     let clinicData = null;
-    let apiEndpoint = 'http://localhost:8000'; // Default endpoint
+    let apiEndpoint = 'http://192.168.1.169:5000'; // Default endpoint
     
     // Fetch helper that goes through content script (bypasses CORS/mixed content)
     const pendingFetches = new Map();
