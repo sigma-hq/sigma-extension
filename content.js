@@ -6,6 +6,7 @@ let isCollapsed = false;
 let currentVisitData = null;
 let refreshInProgress = false;
 let currentDisplayId = null;
+let orderingSessionActive = false;
 
 // ==========================================
 // AUTHENTICATION STATE & HELPERS
@@ -111,6 +112,8 @@ async function clearAuthTokens() {
 
 async function handleLogout() {
   console.log('[HMIS] Header logout triggered');
+  orderingSessionActive = false;
+  updateHeaderControls();
   await clearAuthTokens();
   renderOrderingTab();
 }
@@ -119,6 +122,13 @@ function updateRefreshButtonState() {
   const refreshBtn = overlay?.querySelector('#hmis-refresh-btn');
   if (!refreshBtn) return;
   refreshBtn.disabled = refreshInProgress || !currentUuid;
+}
+
+function updateHeaderControls() {
+  updateRefreshButtonState();
+  const headerLogoutBtn = overlay?.querySelector('#hmis-header-logout-btn');
+  if (!headerLogoutBtn) return;
+  headerLogoutBtn.style.display = orderingSessionActive ? 'inline-flex' : 'none';
 }
 
 // Check if authenticated
@@ -302,7 +312,7 @@ async function showOverlay(uuid, displayId) {
         <div style="display: flex; align-items: center; gap: 8px;">
           <button id="hmis-refresh-btn" title="Refresh summary" style="background:none;border:1px solid rgba(255,255,255,0.4);color:#fff;padding:6px 10px;border-radius:6px;cursor:pointer;font-size:12px;transition:background 0.2s;">Refresh</button>
           <button id="hmis-settings-btn" title="Settings" style="background:none;border:1px solid rgba(255,255,255,0.4);color:#fff;padding:6px 10px;border-radius:6px;cursor:pointer;font-size:12px;transition:background 0.2s;">Settings</button>
-          <button id="hmis-header-logout-btn" title="Logout" style="background:none;border:1px solid rgba(255,255,255,0.4);color:#fff;padding:6px 10px;border-radius:6px;cursor:pointer;font-size:12px;transition:background 0.2s;">Logout</button>
+          <button id="hmis-header-logout-btn" title="Logout" style="background:#c62828;border:none;color:#fff;padding:6px 10px;border-radius:6px;cursor:pointer;font-size:12px;transition:opacity 0.2s;display:none;">Logout</button>
           <button id="hmis-minimize-btn" title="Minimize" style="background:none; border:none; font-size:20px; cursor:pointer; color:white; padding:0;">-</button>
         </div>
       </div>
@@ -1031,6 +1041,8 @@ function renderOrderingTab() {
   
   // Check authentication first
   isAuthenticated().then(authenticated => {
+    orderingSessionActive = authenticated;
+    updateHeaderControls();
     if (!authenticated) {
       // Show login form
       renderLoginForm(content);
@@ -1128,6 +1140,8 @@ function renderLoginForm(container) {
       
       const data = await response.json();
       await saveAuthTokens(data.access, data.refresh);
+      orderingSessionActive = true;
+      updateHeaderControls();
       
       successDiv.style.display = 'block';
       
@@ -1182,9 +1196,6 @@ async function renderOrderingInterface(container) {
     <div style="padding: 0;">
       <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
         <h3 style="margin: 0; font-size: 14px; color: #00897B;">Ordering & Billing</h3>
-        <button id="hmis-logout-btn" style="background: #f44336; color: white; border: none; padding: 6px 12px; border-radius: 4px; font-size: 11px; cursor: pointer;">
-          Logout
-        </button>
       </div>
 
       <div style="margin-bottom: 16px; font-size: 12px; color: #555;">
@@ -1260,17 +1271,10 @@ function setupOrderingHandlers(container, clinicId, visitId) {
   const submitBtn = container.querySelector('#hmis-submit-dispense-btn');
   const dispenseNotes = container.querySelector('#hmis-dispense-notes');
   const statusDiv = container.querySelector('#hmis-dispense-status');
-  const logoutBtn = container.querySelector('#hmis-logout-btn');
   
   let selectedLocationId = null; // optional, kept for future stock-deduction support
   let products = [];
   let cart = [];
-  
-  // Logout handler - FIXED
-  logoutBtn.addEventListener('click', async () => {
-    console.log('[Ordering] Logout button clicked');
-    await handleLogout();
-  });
   
   // Load all products from Odoo catalog - FIXED
   async function loadAllProducts() {
