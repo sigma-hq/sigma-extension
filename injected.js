@@ -544,6 +544,10 @@
       closeButton.focus();
     }
   
+    let listObserver = null;
+    let listObserverTarget = null;
+    let tableWatcher = null;
+
     async function processNewMedications() {
       console.log("processNewMedications called - clinicData:", clinicData);
       console.log("Clinic ID in processNewMedications:", clinicData?.clinicId);
@@ -610,18 +614,21 @@
       });
     }
   
-    function setupObserver() {
-      const targetNode = document.querySelector('.new-drug-order ul.table-mimic');
-      
-      if (!targetNode) {
-        console.log("Prescription table not found yet, retrying...");
-        setTimeout(setupObserver, 1000);
+    function attachListObserver(targetNode) {
+      if (!targetNode) return;
+
+      if (listObserver && listObserverTarget === targetNode) {
         return;
       }
-  
-      console.log("Prescription table found, setting up observer");
-  
-      const observer = new MutationObserver((mutations) => {
+
+      if (listObserver) {
+        listObserver.disconnect();
+      }
+
+      listObserverTarget = targetNode;
+      console.log("Attaching inventory observer to prescription table");
+
+      listObserver = new MutationObserver((mutations) => {
         let hasNewItems = false;
         let hasRemovedItems = false;
         
@@ -663,13 +670,26 @@
           setTimeout(processNewMedications, 500);
         }
       });
-  
-      observer.observe(targetNode, {
+
+      listObserver.observe(targetNode, {
         childList: true,
         subtree: true
       });
-  
+
       setTimeout(processNewMedications, 1000);
+    }
+
+    function setupObserver() {
+      const targetNode = document.querySelector('.new-drug-order ul.table-mimic');
+      
+      if (!targetNode) {
+        console.log("Prescription table not found yet, retrying...");
+        setTimeout(setupObserver, 1000);
+        return;
+      }
+  
+      console.log("Prescription table found, setting up observer");
+      attachListObserver(targetNode);
     }
   
     function watchAddButton() {
@@ -686,6 +706,42 @@
         setTimeout(processNewMedications, 800);
       });
     }
+
+    function watchSaveButton() {
+      const saveButton = document.querySelector('button.save-consultation');
+      if (!saveButton) {
+        setTimeout(watchSaveButton, 1000);
+        return;
+      }
+
+      console.log("Save button found, attaching listener");
+      saveButton.addEventListener('click', () => {
+        console.log("Save button clicked - refreshing inventory monitor");
+        checkedMedications.clear();
+        requestClinicData();
+        setTimeout(() => {
+          setupObserver();
+          processNewMedications();
+        }, 800);
+      });
+    }
+
+    function watchTableRebuild() {
+      if (tableWatcher) return;
+
+      tableWatcher = new MutationObserver(() => {
+        const targetNode = document.querySelector('.new-drug-order ul.table-mimic');
+        if (targetNode && targetNode !== listObserverTarget) {
+          console.log("Prescription table replaced - reattaching observer");
+          attachListObserver(targetNode);
+        }
+      });
+
+      tableWatcher.observe(document.body, {
+        childList: true,
+        subtree: true
+      });
+    }
   
     //  INITIALIZE
     function initialize() {
@@ -696,10 +752,14 @@
         document.addEventListener('DOMContentLoaded', () => {
           setupObserver();
           watchAddButton();
+          watchSaveButton();
+          watchTableRebuild();
         });
       } else {
         setupObserver();
         watchAddButton();
+        watchSaveButton();
+        watchTableRebuild();
       }
     }
   
