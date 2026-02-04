@@ -4,6 +4,9 @@ let currentUuid = null;
 let overlay = null;
 let isCollapsed = false;
 let currentVisitData = null;
+let refreshInProgress = false;
+let currentDisplayId = null;
+let orderingSessionActive = false;
 
 // ==========================================
 // AUTHENTICATION STATE & HELPERS
@@ -105,6 +108,27 @@ async function clearAuthTokens() {
   return new Promise((resolve) => {
     chrome.storage.local.remove(['authAccess', 'authRefresh'], resolve);
   });
+}
+
+async function handleLogout() {
+  console.log('[HMIS] Header logout triggered');
+  orderingSessionActive = false;
+  updateHeaderControls();
+  await clearAuthTokens();
+  renderOrderingTab();
+}
+
+function updateRefreshButtonState() {
+  const refreshBtn = overlay?.querySelector('#hmis-refresh-btn');
+  if (!refreshBtn) return;
+  refreshBtn.disabled = refreshInProgress || !currentUuid;
+}
+
+function updateHeaderControls() {
+  updateRefreshButtonState();
+  const headerLogoutBtn = overlay?.querySelector('#hmis-header-logout-btn');
+  if (!headerLogoutBtn) return;
+  headerLogoutBtn.style.display = orderingSessionActive ? 'inline-flex' : 'none';
 }
 
 // Check if authenticated
@@ -255,6 +279,7 @@ function extractPatient() {
 
   if (uuid && uuid !== currentUuid) {
     currentUuid = uuid;
+    currentDisplayId = displayId;
     console.log("Bahmni patient detected:", { uuid, displayId });
     showOverlay(uuid, displayId);
   }
@@ -262,6 +287,7 @@ function extractPatient() {
 
 async function showOverlay(uuid, displayId) {
   if (overlay) overlay.remove();
+  currentDisplayId = displayId || currentDisplayId;
 
   overlay = document.createElement('div');
   overlay.style.position = 'fixed';
@@ -283,9 +309,11 @@ async function showOverlay(uuid, displayId) {
     <div id="hmis-overlay-expanded">
       <div style="display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid #e0e0e0; background: #00897B; color: white; border-radius: 10px 10px 0 0;">
         <strong style="font-size: 15px;">Sigma HMIS Visit Summary</strong>
-        <div style="display: flex; align-items: center; gap: 12px;">
-          <button id="hmis-settings-btn" title="Settings" style="background:none; border:none; font-size:16px; cursor:pointer; color:white; padding:4px 6px; display:flex; align-items:center; justify-content:center; border-radius:4px; transition:background 0.2s;">⚙</button>
-          <button id="hmis-minimize-btn" title="Minimize" style="background:none; border:none; font-size:20px; cursor:pointer; color:white; padding:0;">−</button>
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <button id="hmis-refresh-btn" title="Refresh summary" style="background:none;border:1px solid rgba(255,255,255,0.4);color:#fff;padding:6px 10px;border-radius:6px;cursor:pointer;font-size:12px;transition:background 0.2s;">Refresh</button>
+          <button id="hmis-settings-btn" title="Settings" style="background:none;border:1px solid rgba(255,255,255,0.4);color:#fff;padding:6px 10px;border-radius:6px;cursor:pointer;font-size:12px;transition:background 0.2s;">Settings</button>
+          <button id="hmis-header-logout-btn" title="Logout" style="background:#c62828;border:none;color:#fff;padding:6px 10px;border-radius:6px;cursor:pointer;font-size:12px;transition:opacity 0.2s;display:none;">Logout</button>
+          <button id="hmis-minimize-btn" title="Minimize" style="background:none; border:none; font-size:20px; cursor:pointer; color:white; padding:0;">-</button>
         </div>
       </div>
       
@@ -314,11 +342,29 @@ async function showOverlay(uuid, displayId) {
 
   const minimizeBtn = overlay.querySelector('#hmis-minimize-btn');
   const settingsBtn = overlay.querySelector('#hmis-settings-btn');
+  const refreshBtn = overlay.querySelector('#hmis-refresh-btn');
+  const headerLogoutBtn = overlay.querySelector('#hmis-header-logout-btn');
   const expanded = overlay.querySelector('#hmis-overlay-expanded');
   const collapsed = overlay.querySelector('#hmis-overlay-collapsed');
 
   // SETUP TABS FIRST - BEFORE ANY ERROR CAN OCCUR
   setupTabs();
+
+  if (refreshBtn) {
+    refreshBtn.addEventListener('click', async () => {
+      if (!currentUuid || refreshInProgress) return;
+      refreshInProgress = true;
+      updateRefreshButtonState();
+      try {
+        await showOverlay(currentUuid, currentDisplayId);
+      } catch (err) {
+        console.error('[HMIS] Manual refresh failed:', err);
+      } finally {
+        refreshInProgress = false;
+        updateRefreshButtonState();
+      }
+    });
+  }
 
   // Settings button click handler - switch to settings tab
   settingsBtn.addEventListener('click', (e) => {
@@ -336,6 +382,12 @@ async function showOverlay(uuid, displayId) {
   settingsBtn.addEventListener('mouseleave', () => {
     settingsBtn.style.background = 'none';
   });
+
+  if (headerLogoutBtn) {
+    headerLogoutBtn.addEventListener('click', async () => {
+      await handleLogout();
+    });
+  }
 
   minimizeBtn.addEventListener('click', () => {
     expanded.style.display = 'none';
@@ -364,6 +416,8 @@ async function showOverlay(uuid, displayId) {
   collapsed.addEventListener('mouseleave', () => {
     collapsed.style.transform = 'scale(1)';
   });
+
+  updateRefreshButtonState();
 
   try {
     // Get API endpoint from storage - use exactly as configured
@@ -987,6 +1041,8 @@ function renderOrderingTab() {
   
   // Check authentication first
   isAuthenticated().then(authenticated => {
+    orderingSessionActive = authenticated;
+    updateHeaderControls();
     if (!authenticated) {
       // Show login form
       renderLoginForm(content);
@@ -1084,6 +1140,8 @@ function renderLoginForm(container) {
       
       const data = await response.json();
       await saveAuthTokens(data.access, data.refresh);
+      orderingSessionActive = true;
+      updateHeaderControls();
       
       successDiv.style.display = 'block';
       
@@ -1138,9 +1196,6 @@ async function renderOrderingInterface(container) {
     <div style="padding: 0;">
       <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
         <h3 style="margin: 0; font-size: 14px; color: #00897B;">Ordering & Billing</h3>
-        <button id="hmis-logout-btn" style="background: #f44336; color: white; border: none; padding: 6px 12px; border-radius: 4px; font-size: 11px; cursor: pointer;">
-          Logout
-        </button>
       </div>
 
       <div style="margin-bottom: 16px; font-size: 12px; color: #555;">
@@ -1216,20 +1271,10 @@ function setupOrderingHandlers(container, clinicId, visitId) {
   const submitBtn = container.querySelector('#hmis-submit-dispense-btn');
   const dispenseNotes = container.querySelector('#hmis-dispense-notes');
   const statusDiv = container.querySelector('#hmis-dispense-status');
-  const logoutBtn = container.querySelector('#hmis-logout-btn');
   
   let selectedLocationId = null; // optional, kept for future stock-deduction support
   let products = [];
   let cart = [];
-  
-  // Logout handler - FIXED
-  logoutBtn.addEventListener('click', async () => {
-    console.log('[Ordering] Logout button clicked');
-    await clearAuthTokens();
-    console.log('[Ordering] Auth tokens cleared');
-    // Re-render the ordering tab to show login form
-    renderOrderingTab();
-  });
   
   // Load all products from Odoo catalog - FIXED
   async function loadAllProducts() {
