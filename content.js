@@ -1250,7 +1250,7 @@ async function renderOrderingInterface(container) {
           disabled
           style="background: #00897B; color: white; border: none; padding: 12px 24px; border-radius: 4px; font-size: 13px; font-weight: 500; cursor: pointer; width: 100%; margin-top: 16px; opacity: 0.5;"
         >
-          Submit Dispensation
+          Create Order
         </button>
       </div>
       
@@ -1570,8 +1570,8 @@ function setupOrderingHandlers(container, clinicId, visitId) {
             <div style="flex: 0.9; text-align: right; padding: 0 4px;">
               <input 
                 type="number" 
-                min="0.01" 
-                step="0.01"
+                min="1" 
+                step="1"
                 value="${item.quantity}"
                 data-index="${index}"
                 class="hmis-cart-quantity"
@@ -1613,7 +1613,7 @@ function setupOrderingHandlers(container, clinicId, visitId) {
       cartItems.querySelectorAll('.hmis-cart-quantity').forEach(input => {
         input.addEventListener('change', (e) => {
           const index = parseInt(e.target.dataset.index);
-          const newQty = parseFloat(e.target.value) || 0;
+          const newQty = parseInt(e.target.value, 10) || 0;
           if (newQty > 0) {
             cart[index].quantity = newQty;
           } else {
@@ -1674,7 +1674,7 @@ function setupOrderingHandlers(container, clinicId, visitId) {
           product_id: item.product_id, // This is odoo_id
           quantity: item.quantity.toString()
         })),
-        notes: dispenseNotes.value.trim() || 'Dispensed via helper',
+        notes: dispenseNotes.value.trim() || 'Order created via helper',
         sales_order_id: null,
         location_id: selectedLocationId ? parseInt(selectedLocationId) : null
       };
@@ -1687,7 +1687,7 @@ function setupOrderingHandlers(container, clinicId, visitId) {
         console.warn('[Ordering] No pricelist_id found in visit data - not including in payload');
       }
       
-      console.log('[Ordering] Dispensation payload:', JSON.stringify(payload, null, 2));
+      console.log('[Ordering] Sales order payload:', JSON.stringify(payload, null, 2));
       
       const response = await authenticatedFetch(url, {
         method: 'POST',
@@ -1703,9 +1703,9 @@ function setupOrderingHandlers(container, clinicId, visitId) {
         statusDiv.style.padding = '12px';
         statusDiv.style.borderRadius = '4px';
         statusDiv.innerHTML = `
-          ✅ Dispensation successful!<br>
+          ✅ Order created successfully!<br>
           Sales Order ID: ${data.sales_order_id || 'N/A'}<br>
-          <small>Items have been dispensed and sales order created/updated.</small>
+          <small>Sales order created/updated.</small>
         `;
         
         // Clear cart completely - use length = 0 to maintain reference
@@ -1753,7 +1753,7 @@ function setupOrderingHandlers(container, clinicId, visitId) {
       statusDiv.style.padding = '12px';
       statusDiv.style.borderRadius = '4px';
       
-      let friendlyMessage = 'An error occurred while submitting the dispensation.';
+      let friendlyMessage = 'An error occurred while creating the order.';
       if (err.message.includes('Failed to fetch')) {
         friendlyMessage = '⚠️ Could not reach the server. Please check your connection and try again.';
       } else if (err.message.includes('401') || err.message.includes('403')) {
@@ -1765,7 +1765,7 @@ function setupOrderingHandlers(container, clinicId, visitId) {
       statusDiv.innerHTML = `❌ ${friendlyMessage}`;
     } finally {
       submitBtn.disabled = false;
-      submitBtn.textContent = 'Submit Dispensation';
+      submitBtn.textContent = 'Create Order';
     }
   });
 }
