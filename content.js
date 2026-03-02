@@ -1653,41 +1653,21 @@ function setupOrderingHandlers(container, clinicId, visitId) {
         chrome.storage.local.get(['apiEndpoint'], resolve);
       });
       const baseUrl = await getApiEndpoint();
-      const url = `${baseUrl}/api/inventory/product-dispensation/from-helper/`;
+      const url = `${baseUrl}/api/sales-orders/create_from_visit/`;
       
       console.log('[API] Calling endpoint: POST', url);
-      console.log('[Ordering] Submitting dispensation to:', baseUrl);
-      // Get pricelist_id from visit data - check multiple possible locations
-      const pricelistId = currentVisitData?.pricelist?.id || 
-                         currentVisitData?.pricelist_id || 
-                         null;
+      console.log('[Ordering] Creating sales order from visit:', baseUrl);
       
-      console.log('[Ordering] Current visit data:', JSON.stringify(currentVisitData, null, 2));
-      console.log('[Ordering] Pricelist ID extracted:', pricelistId);
-      console.log('[Ordering] Pricelist object:', currentVisitData?.pricelist);
-      
+      // create_from_visit expects: visit_id (int), products: [{ product_id, quantity }]
       const payload = {
-        clinic_id: clinicId,
-        visit_id: visitId,
-        patient_uuid: currentUuid,
-        items: cart.map(item => ({
-          product_id: item.product_id, // This is odoo_id
-          quantity: item.quantity.toString()
-        })),
-        notes: dispenseNotes.value.trim() || 'Order created via helper',
-        sales_order_id: null,
-        location_id: selectedLocationId ? parseInt(selectedLocationId) : null
+        visit_id: parseInt(visitId, 10),
+        products: cart.map(item => ({
+          product_id: item.product_id,
+          quantity: Number(item.quantity) || 1
+        }))
       };
       
-      // Only include pricelist_id if it exists (don't send null)
-      if (pricelistId) {
-        payload.pricelist_id = pricelistId;
-        console.log('[Ordering] Including pricelist_id in payload:', pricelistId);
-      } else {
-        console.warn('[Ordering] No pricelist_id found in visit data - not including in payload');
-      }
-      
-      console.log('[Ordering] Sales order payload:', JSON.stringify(payload, null, 2));
+      console.log('[Ordering] create_from_visit payload:', JSON.stringify(payload, null, 2));
       
       const response = await authenticatedFetch(url, {
         method: 'POST',
@@ -1704,8 +1684,8 @@ function setupOrderingHandlers(container, clinicId, visitId) {
         statusDiv.style.borderRadius = '4px';
         statusDiv.innerHTML = `
           ✅ Order created successfully!<br>
-          Sales Order ID: ${data.sales_order_id || 'N/A'}<br>
-          <small>Sales order created/updated.</small>
+          Sales Order: ${data.name || data.id || 'N/A'}<br>
+          <small>Sales order created from visit.</small>
         `;
         
         // Clear cart completely - use length = 0 to maintain reference
@@ -1733,14 +1713,21 @@ function setupOrderingHandlers(container, clinicId, visitId) {
         statusDiv.style.padding = '12px';
         statusDiv.style.borderRadius = '4px';
         
-        let errorMsg = 'Insufficient stock for some items:<br><ul style="margin: 8px 0; padding-left: 20px;">';
+        let errorMsg = '';
         if (errorData.items) {
+          errorMsg = 'Insufficient stock for some items:<br><ul style="margin: 8px 0; padding-left: 20px;">';
           errorData.items.forEach(item => {
             errorMsg += `<li>${item.product_name || `Product ${item.product_id}`}: Requested ${item.requested}, Available ${item.available}</li>`;
           });
+          errorMsg += '</ul>';
+        } else {
+          errorMsg = errorData.detail || 'Validation failed.';
+          if (errorData.errors && typeof errorData.errors === 'object') {
+            const errList = Object.entries(errorData.errors).map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(', ') : v}`).join('; ');
+            if (errList) errorMsg += ' ' + errList;
+          }
         }
-        errorMsg += '</ul>';
-        statusDiv.innerHTML = errorMsg;
+        statusDiv.innerHTML = `❌ ${errorMsg}`;
         
       } else {
         throw new Error(`Server error: ${response.status}`);
